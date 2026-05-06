@@ -57,9 +57,6 @@ struct ModelEntry {
 #[derive(Serialize, Clone)]
 struct LogEntry {
     time: String,
-    from: String,
-    to: String,
-    provider: String,
     status: u16,
 }
 
@@ -688,7 +685,6 @@ async fn proxy_fallback(
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
-    let original_model = data.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let resolved = if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
         let r = resolve_model(model, &config);
         eprintln!("  model: {} -> {} ({})", model, r.model, r.target_url);
@@ -745,12 +741,9 @@ async fn proxy_fallback(
     let raw_status = resp.status().as_u16();
     let status = StatusCode::from_u16(raw_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
+    {
         let entry = LogEntry {
             time: chrono_now(),
-            from: original_model.clone(),
-            to: model.to_string(),
-            provider: resolved.target_url.clone(),
             status: raw_status,
         };
         let mut logs = state.logs.write().unwrap_or_else(|e| e.into_inner());

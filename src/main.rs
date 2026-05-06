@@ -57,6 +57,7 @@ struct ModelEntry {
 #[derive(Serialize, Clone)]
 struct LogEntry {
     time: String,
+    model: String,
     status: u16,
 }
 
@@ -741,9 +742,10 @@ async fn proxy_fallback(
     let raw_status = resp.status().as_u16();
     let status = StatusCode::from_u16(raw_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    {
+    if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
         let entry = LogEntry {
             time: chrono_now(),
+            model: model.to_string(),
             status: raw_status,
         };
         let mut logs = state.logs.write().unwrap_or_else(|e| e.into_inner());

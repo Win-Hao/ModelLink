@@ -514,7 +514,8 @@ async function loadLogs() {
       return `<div class="log-row flex items-center gap-2">
         <span class="opacity-40 flex-shrink-0">${esc(l.time)}</span>
         <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${ok?'bg-accent':'bg-error'}"></span>
-        <span class="font-medium">${ok ? '请求成功' : 'HTTP '+l.status}</span>
+        <span class="truncate font-medium">${esc(l.model)}</span>
+        <span class="opacity-40 flex-shrink-0">${ok ? '成功' : l.status}</span>
       </div>`;
     }).join('');
   } catch(e) {

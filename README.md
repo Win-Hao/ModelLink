@@ -25,14 +25,14 @@
 
 | 平台 | 文件 |
 |------|------|
-| macOS | `ModelLink.app.zip` |
+| macOS | `ModelLink.dmg` |
 | Windows | `ModelLink-Windows.zip` |
 
 ## 安装
 
 ### macOS
 
-1. 解压 `ModelLink-macOS.zip`
+1. 下载 `ModelLink.dmg`，双击打开
 2. 将 `ModelLink.app` 拖入「应用程序」文件夹
 3. 首次打开如果提示"已损坏"，在终端执行：
    ```bash

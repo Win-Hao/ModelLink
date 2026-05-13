@@ -270,6 +270,15 @@ body { min-height: 100vh; overflow-y: scroll; scrollbar-gutter: stable; padding-
 
 <script>
 const MAX_MODELS = 8;
+const ANTHROPIC_SLOTS = [
+  'claude-3-opus-latest','claude-3-5-sonnet-latest','claude-3-sonnet-20240229','claude-3-haiku-20240307',
+  'claude-3-5-haiku-latest','claude-3-opus-20240229','claude-3-5-sonnet-20241022','claude-3-5-sonnet-20240620',
+];
+function globalModelStart(pi) {
+  let c = 0;
+  for (let i = 0; i < pi; i++) c += (cfg.providers?.[i]?.models || []).length;
+  return c;
+}
 let cfg = {};
 
 const PRESETS = [
@@ -373,8 +382,11 @@ function render() {
     const card = document.createElement('div');
     card.className = 'card bg-base-200 provider-card';
     const presetModels = getPresetModels(p.target_url);
+    const gBase = globalModelStart(pi);
     let modelsHtml = '';
     (p.models || []).forEach((m, mi) => {
+      const gIdx = gBase + mi;
+      const slotName = gIdx < ANTHROPIC_SLOTS.length ? ANTHROPIC_SLOTS[gIdx] : '';
       const safeVal = (m.name||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
       const dlId = 'ml-'+pi+'-'+mi;
       const modelInput = `<input type="text" class="input input-bordered input-sm flex-1 min-w-0" list="${dlId}" value="${safeVal}" onchange="cfg.providers[${pi}].models[${mi}].name=this.value" placeholder="输入或选择模型">` +
@@ -389,7 +401,8 @@ function render() {
           <button class="btn btn-ghost btn-xs btn-square opacity-20 hover:opacity-80 hover:text-error" onclick="delModel(${pi},${mi})">
             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
-        </div>`;
+        </div>
+        ${slotName ? `<div class="text-[11px] opacity-25 ml-1 -mt-0.5 mb-1">Claude 中显示为: ${slotName}</div>` : ''}`;
     });
 
     const safeUrl = (p.target_url||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');

@@ -21,16 +21,16 @@ const HTML: &str = include_str!("ui.html");
 
 const MAX_MODELS: usize = 8;
 
-fn make_slot(name: &str) -> String {
-    let safe: String = name.chars().map(|c| {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-            c
-        } else {
-            '-'
-        }
-    }).collect();
-    format!("claude-{}", safe)
-}
+const ANTHROPIC_SLOTS: &[&str] = &[
+    "claude-3-opus-latest",
+    "claude-3-5-sonnet-latest",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+    "claude-3-5-haiku-latest",
+    "claude-3-opus-20240229",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-20240620",
+];
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Config {
@@ -165,9 +165,9 @@ fn flatten_config(config: &Config) -> Vec<FlatEntry> {
     let mut count = 0;
     for provider in &config.providers {
         for m in &provider.models {
-            if count < MAX_MODELS && !m.name.is_empty() {
+            if count < MAX_MODELS && count < ANTHROPIC_SLOTS.len() && !m.name.is_empty() {
                 result.push(FlatEntry {
-                    slot: make_slot(&m.name),
+                    slot: ANTHROPIC_SLOTS[count].to_string(),
                     name: m.name.clone(),
                     to_1m: m.to_1m.clone(),
                     url: provider.target_url.clone(),

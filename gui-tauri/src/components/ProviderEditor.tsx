@@ -40,6 +40,7 @@ import {
   getPresetModels,
   getThinkingOptions,
   providerDisplayName,
+  providerNeedsEffortDefault,
   rawSlotForModel,
   totalModelsRaw,
 } from "@/lib/presets";
@@ -323,6 +324,9 @@ export function ProviderEditor({ index }: { index: number }) {
   const capReached = totalModelsRaw(draft) >= MAX_MODELS;
   const name = providerDisplayName(p.target_url, index);
   const busy = applyState === "applying";
+  // 只有落在「Claude 里没有强度选择器」的槽位上的模型才够得着服务商级默认档
+  const needsEffortDefault = providerNeedsEffortDefault(draft, index);
+  const staleEffort = !needsEffortDefault && p.thinking_effort !== "";
 
   // 测试反馈走 toast（2026-07-14 用户调整，原 inline 结果 6s 淡出）
   const runTest = async () => {
@@ -594,39 +598,61 @@ export function ProviderEditor({ index }: { index: number }) {
         </Button>
       )}
 
-      {/* 底行：默认推理强度 + 删除服务商 */}
+      {/* 底行：默认推理强度（仅在够得着时显示）+ 删除服务商 */}
       <div className="mt-0.5 flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <div className="min-w-0">
-            <div className="text-[11px] font-medium text-muted-foreground">默认推理强度</div>
-            {/* 2.1-A §3.10：语义从「强制」降级为「默认档位」 */}
-            <div className="mt-px truncate text-[10.5px] text-faint">
-              桌面端选择器优先；此处仅在桌面端未指定时生效
+        {needsEffortDefault ? (
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium text-muted-foreground">默认推理强度</div>
+              <div className="mt-px truncate text-[10.5px] text-faint">
+                这些模型的槽位在 Claude 里没有强度选择器，只能在这里设
+              </div>
             </div>
-          </div>
-          <Select
-            value={p.thinking_effort === "" ? "default" : p.thinking_effort}
-            onValueChange={(v) =>
-              updateDraft((c) => {
-                c.providers[index].thinking_effort = v === "default" ? "" : v;
-              })
-            }
-          >
-            <SelectTrigger
-              size="sm"
-              className="h-[29px] gap-2 rounded-[8px] border-input bg-input-bg px-2.5 text-xs shadow-none dark:bg-input-bg"
+            <Select
+              value={p.thinking_effort === "" ? "default" : p.thinking_effort}
+              onValueChange={(v) =>
+                updateDraft((c) => {
+                  c.providers[index].thinking_effort = v === "default" ? "" : v;
+                })
+              }
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {thinkOpts.map((v) => (
-                <SelectItem key={v || "default"} value={v || "default"} className="text-xs">
-                  {THINKING_LABELS[v]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+              <SelectTrigger
+                size="sm"
+                className="h-[29px] gap-2 rounded-[8px] border-input bg-input-bg px-2.5 text-xs shadow-none dark:bg-input-bg"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {thinkOpts.map((v) => (
+                  <SelectItem key={v || "default"} value={v || "default"} className="text-xs">
+                    {THINKING_LABELS[v]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : staleEffort ? (
+          // 下拉已隐藏（模型都在有选择器的槽位上），但配置里还留着旧值 ——
+          // 它只对不带 effort 的内部请求生效，看不见却还在起作用，得给个清除入口
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[10.5px] text-faint">
+              旧的服务商级推理强度「{THINKING_LABELS[p.thinking_effort]}」已基本不生效 ——
+              这些模型在 Claude 里可以逐次选
+            </span>
+            <button
+              onClick={() =>
+                updateDraft((c) => {
+                  c.providers[index].thinking_effort = "";
+                })
+              }
+              className="flex-none rounded-[5px] border px-1.5 py-px text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              清除
+            </button>
+          </div>
+        ) : (
+          <span />
+        )}
         <AlertDialog>
           <AlertDialogTrigger asChild>
             <Button

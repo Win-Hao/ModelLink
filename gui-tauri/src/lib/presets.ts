@@ -261,6 +261,23 @@ export function flattenModels(config: Config): FlatModel[] {
   return out;
 }
 
+/**
+ * 这个服务商还需不需要「默认推理强度」下拉。
+ *
+ * 换用 2.1 槽位池后，前 6 个槽位在 Claude Desktop 里有原生 5 档 / 4 档选择器，
+ * 桌面端每次都会把选中的档位发过来，服务商级设置**完全不参与**（§3.10 透传优先）。
+ * 只有落在没有选择器的槽位上的模型才够得着它：
+ * `claude-sonnet-4-5` / `claude-haiku-4-5`（Vwt 里没有 effortLevels）
+ * 以及 `claude-ml-*` 溢出层（连表都不在）。
+ *
+ * 留一个 90% 情况下不生效的下拉本身就是困惑源，所以按槽位隐藏。
+ */
+export function providerNeedsEffortDefault(config: Config, providerIndex: number): boolean {
+  return flattenModels(config).some(
+    (m) => m.providerIndex === providerIndex && m.efforts.length === 0,
+  );
+}
+
 /** 模型行的槽位提示用「原始序号」（含未命名行，平移 v1 globalModelStart 行为）。 */
 export function rawSlotForModel(config: Config, pi: number, mi: number): string {
   let idx = 0;

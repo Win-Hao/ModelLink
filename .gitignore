@@ -1,5 +1,8 @@
 .DS_Store
 
+# 编辑器 / 工具缓存
+.serena/
+
 # v1 时代的分发产物与临时素材（保留在磁盘，不进版本库）
 ModelLink-macOS.zip
 ModelLink-Windows.zip

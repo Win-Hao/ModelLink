@@ -30,6 +30,8 @@ export type ModelEntry = {
   family_tier?: string;
   /** 同层级多条时指定哪条接管别名（需先设层级）。 */
   family_default?: boolean;
+  /** 上游该模型的最大上下文（token），由 models.dev 同步填，界面只读。 */
+  context_limit?: number;
 };
 
 export type Provider = {

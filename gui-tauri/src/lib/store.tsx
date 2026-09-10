@@ -181,7 +181,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
             : {
                 target_url: preset.url,
                 api_key: "",
-                models: preset.models.map((name) => ({ name, to_1m: "auto" })),
+                // 不默认开 1M —— 预设里多数模型上下文是 200K/256K（见 ProviderEditor 注释）
+                models: preset.models.map((name) => ({ name, to_1m: "" })),
                 thinking_effort: "",
               };
         c.providers.push(p);

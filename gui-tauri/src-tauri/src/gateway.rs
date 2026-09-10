@@ -470,6 +470,21 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
         }
     }
 
+    // 开着 1M 但已知装不下的模型：不拦，但要说出来。
+    // 后果是静默的 —— 引擎照发 1M beta 头，上游按自己的上限截断，用户以为有 1M。
+    let mut bad_1m: Vec<String> = Vec::new();
+    for p in &config.providers {
+        for m in &p.models {
+            if m.claims_1m_it_does_not_have() {
+                bad_1m.push(format!(
+                    "{}（上游仅 {}K）",
+                    m.name,
+                    m.context_limit.unwrap_or(0) / 1024
+                ));
+            }
+        }
+    }
+
     let claude_dir = claude_3p_dir().ok_or("Cannot find home directory")?;
     let config_lib = claude_dir.join("configLibrary");
     std::fs::create_dir_all(&config_lib).map_err(|e| {
@@ -653,7 +668,14 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
     }
 
 
-    Ok(format!("Written to {}", config_file.display()))
+    let mut msg = format!("Written to {}", config_file.display());
+    if !bad_1m.is_empty() {
+        let warn = format!("以下模型开着 1M 但上游装不下，1M 变体不会真的生效：{}", bad_1m.join("、"));
+        eprintln!("[apply] WARN: {warn}");
+        msg.push('\n');
+        msg.push_str(&warn);
+    }
+    Ok(msg)
 }
 
 struct ScopeGuard<F: FnOnce()>(Option<F>);
@@ -792,6 +814,37 @@ mod tests {
     }
 
     // ---- §3.5 模型条目补三个字段 ----
+
+    #[test]
+    #[ignore = "改 HOME，需串行运行"]
+    fn apply_warns_about_1m_the_upstream_cannot_hold() {
+        let tmp = std::env::temp_dir().join(format!("ml-1m-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+
+        let cfg = cfg_with(vec![
+            ModelEntry {
+                name: "Kimi-k2.6".into(),
+                to_1m: "auto".into(),
+                context_limit: Some(262_144),
+                ..Default::default()
+            },
+            ModelEntry {
+                name: "deepseek-v4-pro".into(),
+                to_1m: "auto".into(),
+                context_limit: Some(1_000_000),
+                ..Default::default()
+            },
+            // 未知上限的不该被点名
+            ModelEntry { name: "unknown".into(), to_1m: "auto".into(), ..Default::default() },
+        ]);
+        let msg = apply_to_claude_desktop(&cfg).unwrap();
+        assert!(msg.contains("Kimi-k2.6（上游仅 256K）"), "{msg}");
+        assert!(!msg.contains("deepseek-v4-pro"), "{msg}");
+        assert!(!msg.contains("unknown"), "{msg}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn model_entries_carry_tier_and_prefer1m_only_when_set() {

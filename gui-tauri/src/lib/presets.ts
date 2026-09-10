@@ -10,6 +10,20 @@ export const MAX_MODELS = 20;
 /** 镜像后端 config.rs::FAMILY_TIERS（app.asar 里的 Ba 数组，§3.5）。 */
 export const FAMILY_TIERS = ["sonnet", "opus", "haiku", "fable", "mythos"] as const;
 
+/** 「1M 上下文」的判定门槛：各家数字不一（Kimi 1048576 / 智谱 1000000），取下限。 */
+export const ONE_M_CONTEXT = 1_000_000;
+
+/** 已知这个模型装不下 1M，却开着 1M 开关。未知（没同步到）时不下结论。 */
+export function claims1mItDoesNotHave(m: { to_1m: string; context_limit?: number }): boolean {
+  return !!m.to_1m && m.context_limit !== undefined && m.context_limit < ONE_M_CONTEXT;
+}
+
+/** 上下文大小的人类可读写法：262144 → 256K。 */
+export function formatContext(n?: number): string {
+  if (!n) return "";
+  return n >= ONE_M_CONTEXT ? `${Math.round(n / 1024 / 1024)}M` : `${Math.round(n / 1024)}K`;
+}
+
 /** §3.8：键 → 用户看得懂的能力名，用于「因版本过低不可用」提示。 */
 export const KEY_FEATURE_NAMES: Record<string, string> = {
   chatTabEnabled: "Chat 页",

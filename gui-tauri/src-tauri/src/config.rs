@@ -238,12 +238,35 @@ pub struct ModelEntry {
     /// 无 `family_tier` 时无效。
     #[serde(default, skip_serializing_if = "is_false")]
     pub family_default: bool,
+    /// 2.1 新增：上游该模型的最大上下文（token），由 models.dev 同步填，用户不编辑。
+    /// 用来判断「开着 1M 但这个模型根本装不下」。None = 未知，不下结论。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u64>,
 }
+
+/// 「1M 上下文」的判定门槛。各家给的数字不一样：Kimi 是 1048576，
+/// DeepSeek / 智谱 / 百炼是 1000000 —— 取 1000000 作为下限。
+pub const ONE_M_CONTEXT: u64 = 1_000_000;
 
 /// `anthropicFamilyTier` 的合法取值（app.asar 实测 `Ba` 数组）。
 pub const FAMILY_TIERS: &[&str] = &["sonnet", "opus", "haiku", "fable", "mythos"];
 
 impl ModelEntry {
+    /// 这个模型有没有 1M 上下文。**未知时返回 true** —— 只有明确知道装不下才提示用户，
+    /// 绝不因为 models.dev 里缺一条数据就去质疑用户的设置。
+    pub fn has_1m_context(&self) -> bool {
+        self.context_limit.map(|c| c >= ONE_M_CONTEXT).unwrap_or(true)
+    }
+
+    /// 开着 1M 开关，但已知这个模型装不下。
+    ///
+    /// 后果是静默的：引擎会剥掉 `[1m]` 后缀改发 `anthropic-beta: context-1m-2025-08-07`
+    /// 头（实测代理从没收到过带 `[1m]` 的请求），多数上游照收不误但仍按自己的上限截断 ——
+    /// 用户以为有 1M，实际没有。
+    pub fn claims_1m_it_does_not_have(&self) -> bool {
+        !self.to_1m.is_empty() && !self.has_1m_context()
+    }
+
     /// 实际写进网关的费率：手填优先，否则用同步值。
     pub fn effective_pricing(&self) -> Option<&ModelPricing> {
         match self.pricing.as_ref().filter(|p| !p.is_empty()) {

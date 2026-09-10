@@ -34,6 +34,8 @@ import {
 import {
   FAMILY_TIERS,
   MAX_MODELS,
+  claims1mItDoesNotHave,
+  formatContext,
   THINKING_LABELS,
   getPresetModels,
   getThinkingOptions,
@@ -443,6 +445,7 @@ export function ProviderEditor({ index }: { index: number }) {
       {p.models.map((m, mi) => {
         const slot = rawSlotForModel(draft, index, mi);
         const dlId = `ml-models-${index}-${mi}`;
+        const bad1m = claims1mItDoesNotHave(m);
         const priced = PRICE_FIELDS.some(
           (f) => m.pricing?.[f.key] != null || m.pricing_synced?.[f.key] != null,
         );
@@ -475,7 +478,28 @@ export function ProviderEditor({ index }: { index: number }) {
                   })
                 }
               />
-              <span className="-ml-[3px] text-[10.5px] text-faint">1M</span>
+              {/* 已知这个模型装不下 1M 却开着 —— 引擎会照发 1M beta 头，
+                  上游按自己的上限截断，用户以为有 1M 其实没有 */}
+              <span
+                className={cn(
+                  "-ml-[3px] text-[10.5px]",
+                  bad1m ? "font-semibold text-warning" : "text-faint",
+                )}
+                title={
+                  bad1m
+                    ? `上游该模型上下文只有 ${formatContext(m.context_limit)}，开着 1M 不会真的生效`
+                    : m.context_limit
+                      ? `上游上下文 ${formatContext(m.context_limit)}`
+                      : undefined
+                }
+              >
+                1M
+              </span>
+              {bad1m && (
+                <span className="flex-none text-[10px] font-medium text-warning">
+                  仅 {formatContext(m.context_limit)}
+                </span>
+              )}
               {/* 费率开关：未填时用警示色 —— 不填 = Claude 按 Anthropic 官方价估算 */}
               <button
                 onClick={() => setPricingOpen(pricingOpen === mi ? null : mi)}
@@ -559,7 +583,9 @@ export function ProviderEditor({ index }: { index: number }) {
           variant="ghost"
           onClick={() =>
             updateDraft((c) => {
-              c.providers[index].models.push({ name: "", to_1m: "auto" });
+              // 默认不开 1M：多数国产模型上下文是 200K/256K，开了只会让选择器给出
+              // 一个不会真的生效的 1M 变体（models.dev 同步后会在行内标出真实上限）
+              c.providers[index].models.push({ name: "", to_1m: "" });
             })
           }
           className="h-[30px] w-full rounded-[9px] border border-dashed text-xs font-normal text-faint hover:border-primary/50 hover:bg-transparent hover:text-primary"

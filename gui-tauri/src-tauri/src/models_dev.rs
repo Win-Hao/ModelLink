@@ -23,8 +23,17 @@ pub const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 /// 自动同步的最小间隔（6 小时）。
 pub const SYNC_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
-/// 拍平后的费率表：models.dev 服务商 ID → 模型 ID → 费率（USD/百万 token）。
-pub type Catalog = HashMap<String, HashMap<String, ModelPricing>>;
+/// 从 models.dev 取到的单个模型信息。
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ModelInfo {
+    /// 费率（USD/百万 token）。
+    pub pricing: ModelPricing,
+    /// 最大上下文（token）。None = 该条目没写。
+    pub context: Option<u64>,
+}
+
+/// 拍平后的目录：models.dev 服务商 ID → 模型 ID → 模型信息。
+pub type Catalog = HashMap<String, HashMap<String, ModelInfo>>;
 
 /// 本地服务商 URL → models.dev 服务商 ID。
 ///
@@ -72,8 +81,12 @@ pub fn parse_catalog(body: &[u8]) -> Result<Catalog, String> {
                 // models.dev 一律 USD —— 标上就不会再被汇率换算一遍
                 currency: "USD".to_string(),
             };
+            let context = model
+                .get("limit")
+                .and_then(|l| l.get("context"))
+                .and_then(|v| v.as_u64());
             if !pricing.is_empty() {
-                entry.insert(model_id.clone(), pricing);
+                entry.insert(model_id.clone(), ModelInfo { pricing, context });
             }
         }
         if !entry.is_empty() {
@@ -88,7 +101,7 @@ pub fn parse_catalog(body: &[u8]) -> Result<Catalog, String> {
 /// 1. 认识这个服务商 → 只在它名下查（同一个模型 ID 在不同服务商价格不同，不能串）
 /// 2. 不认识（用户自定义 URL）→ 全库按模型 ID 查，**只有各家报价完全一致时才采信**，
 ///    有分歧就放弃 —— 猜错价格比不显示价格更糟
-pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelPricing> {
+pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelInfo> {
     let model = model.strip_suffix("[1m]").unwrap_or(model);
     if let Some(pid) = provider_id_for_url(url) {
         let models = catalog.get(pid)?;
@@ -100,17 +113,21 @@ pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelPricing>
         //（实测 kimi-for-coding 只列 k3 / kimi-for-coding，用户填的是 Kimi-k2.6），
         // 而查不到就意味着这个槽位退回 Anthropic 官方价 —— 假账单。
         if is_subscription_plan(models) {
-            return Some(ModelPricing {
-                input: Some(0.0),
-                output: Some(0.0),
-                cache_read: Some(0.0),
-                cache_write: Some(0.0),
-                currency: "USD".to_string(),
+            return Some(ModelInfo {
+                pricing: ModelPricing {
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    cache_read: Some(0.0),
+                    cache_write: Some(0.0),
+                    currency: "USD".to_string(),
+                },
+                // 订阅制方案里列的模型名常与用户填的对不上，上下文上限无从推断
+                context: None,
             });
         }
         return None;
     }
-    let mut found: Option<ModelPricing> = None;
+    let mut found: Option<ModelInfo> = None;
     for models in catalog.values() {
         if let Some(p) = find_ci(models, model) {
             match &found {
@@ -125,16 +142,17 @@ pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelPricing>
 
 /// 这家服务商的每一个模型都定价为 0 → 订阅制，按 token 计费为 0。
 /// 只要有一个模型是按量计价（如百炼 Coding Plan 里的 qwen3.7-max），就不适用。
-fn is_subscription_plan(models: &HashMap<String, ModelPricing>) -> bool {
+fn is_subscription_plan(models: &HashMap<String, ModelInfo>) -> bool {
     !models.is_empty()
-        && models.values().all(|p| {
+        && models.values().all(|m| {
+            let p = &m.pricing;
             [p.input, p.output, p.cache_read, p.cache_write]
                 .iter()
                 .all(|v| v.unwrap_or(0.0) == 0.0)
         })
 }
 
-fn find_ci(models: &HashMap<String, ModelPricing>, model: &str) -> Option<ModelPricing> {
+fn find_ci(models: &HashMap<String, ModelInfo>, model: &str) -> Option<ModelInfo> {
     if let Some(p) = models.get(model) {
         return Some(p.clone());
     }
@@ -155,8 +173,13 @@ pub fn apply_catalog(config: &mut Config, catalog: &Catalog) -> usize {
                 continue;
             }
             let found = lookup(catalog, &url, &m.name);
-            if m.pricing_synced != found {
-                m.pricing_synced = found;
+            let (pricing, context) = match found {
+                Some(info) => (Some(info.pricing), info.context),
+                None => (None, None),
+            };
+            if m.pricing_synced != pricing || m.context_limit != context {
+                m.pricing_synced = pricing;
+                m.context_limit = context;
                 changed += 1;
             }
         }
@@ -186,17 +209,24 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> Result<Catalog, String> 
 /// 没有这一步就有这么个窗口：后台同步刚写完 config.json，用户手上那份草稿还是同步前的，
 /// 一保存就把同步结果整个抹掉。`last_applied_*` / `port` 用的是同一套「后端专管」思路。
 pub fn preserve_synced_pricing(incoming: &mut Config, current: &Config) {
-    let mut known: HashMap<(String, String), ModelPricing> = HashMap::new();
+    type Synced = (Option<ModelPricing>, Option<u64>);
+    let mut known: HashMap<(String, String), Synced> = HashMap::new();
     for p in &current.providers {
         for m in &p.models {
-            if let Some(pr) = &m.pricing_synced {
-                known.insert((p.target_url.clone(), m.name.clone()), pr.clone());
+            if m.pricing_synced.is_some() || m.context_limit.is_some() {
+                known.insert(
+                    (p.target_url.clone(), m.name.clone()),
+                    (m.pricing_synced.clone(), m.context_limit),
+                );
             }
         }
     }
     for p in &mut incoming.providers {
         for m in &mut p.models {
-            m.pricing_synced = known.get(&(p.target_url.clone(), m.name.clone())).cloned();
+            let found = known.get(&(p.target_url.clone(), m.name.clone())).cloned();
+            let (pricing, context) = found.unwrap_or((None, None));
+            m.pricing_synced = pricing;
+            m.context_limit = context;
         }
     }
 }
@@ -226,7 +256,8 @@ mod tests {
       "moonshotai-cn": { "name": "Moonshot AI (China)", "models": {
         "kimi-k2.6": { "cost": { "input": 0.95, "output": 4.0, "cache_read": 0.16 },
                        "limit": { "context": 262144 } },
-        "kimi-k3":   { "cost": { "input": 3, "output": 15, "cache_read": 0.3 } } } },
+        "kimi-k3":   { "cost": { "input": 3, "output": 15, "cache_read": 0.3 },
+                       "limit": { "context": 1048576 } } } },
       "kimi-for-coding": { "name": "Kimi For Coding", "models": {
         "k3": { "cost": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 } } } },
       "deepseek": { "name": "DeepSeek", "models": {
@@ -242,9 +273,9 @@ mod tests {
     #[test]
     fn parses_cost_blocks_and_skips_entries_without_them() {
         let c = catalog();
-        assert_eq!(c["deepseek"]["deepseek-v4-pro"].input, Some(0.435));
-        assert_eq!(c["deepseek"]["deepseek-v4-pro"].output, Some(0.87));
-        assert_eq!(c["deepseek"]["deepseek-v4-pro"].cache_read, None);
+        assert_eq!(c["deepseek"]["deepseek-v4-pro"].pricing.input, Some(0.435));
+        assert_eq!(c["deepseek"]["deepseek-v4-pro"].pricing.output, Some(0.87));
+        assert_eq!(c["deepseek"]["deepseek-v4-pro"].pricing.cache_read, None);
         // 没有 models / 没有 cost 的条目不进表
         assert!(!c.contains_key("no-models"));
         assert!(!c.contains_key("no-cost"));
@@ -254,7 +285,7 @@ mod tests {
     fn parsed_prices_are_marked_usd_so_the_rate_never_touches_them() {
         // models.dev 一律 USD/百万 token，再除一次汇率就成了三分之一价
         let c = catalog();
-        let p = &c["moonshotai-cn"]["kimi-k2.6"];
+        let p = &c["moonshotai-cn"]["kimi-k2.6"].pricing;
         assert_eq!(p.currency, "USD");
         assert_eq!(p.in_usd(7.2), *p);
     }
@@ -263,9 +294,68 @@ mod tests {
     fn subscription_plans_keep_their_zero_prices() {
         // 订阅制没有按 token 计费；0 是有意义的值，不能当成「没填」丢掉
         let c = catalog();
-        let p = &c["kimi-for-coding"]["k3"];
+        let p = &c["kimi-for-coding"]["k3"].pricing;
         assert_eq!(p.input, Some(0.0));
         assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn catalog_carries_the_context_limit() {
+        // 判断一个模型到底有没有 1M 上下文，靠的就是这个字段
+        let c = catalog();
+        assert_eq!(c["moonshotai-cn"]["kimi-k2.6"].context, Some(262_144));
+        assert_eq!(c["moonshotai-cn"]["kimi-k3"].context, Some(1_048_576));
+        // 没有 limit 的条目 → None（未知，不下结论）
+        assert_eq!(c["deepseek"]["deepseek-v4-pro"].context, None);
+    }
+
+    #[test]
+    fn apply_catalog_fills_the_context_limit_too() {
+        let mut cfg = Config {
+            providers: vec![Provider {
+                target_url: "https://api.moonshot.cn/anthropic".into(),
+                api_key: "k".into(),
+                models: vec![ModelEntry {
+                    name: "kimi-k2.6".into(),
+                    to_1m: "auto".into(),
+                    ..Default::default()
+                }],
+                thinking_effort: String::new(),
+            }],
+            ..Default::default()
+        };
+        apply_catalog(&mut cfg, &catalog());
+        assert_eq!(cfg.providers[0].models[0].context_limit, Some(262_144));
+    }
+
+    #[test]
+    fn one_million_context_is_recognised() {
+        // 各家对「1M」的实际数字不一样：Kimi 是 1048576，DeepSeek / 智谱是 1000000
+        assert!(!ModelEntry { context_limit: Some(262_144), ..Default::default() }.has_1m_context());
+        assert!(ModelEntry { context_limit: Some(1_000_000), ..Default::default() }.has_1m_context());
+        assert!(ModelEntry { context_limit: Some(1_048_576), ..Default::default() }.has_1m_context());
+        // 不知道就别下结论 —— 只有「明确知道装不下」才提示用户
+        assert!(ModelEntry { context_limit: None, ..Default::default() }.has_1m_context());
+    }
+
+    #[test]
+    fn the_1m_switch_is_flagged_only_when_we_know_it_cannot_hold() {
+        let on_small = ModelEntry {
+            to_1m: "auto".into(),
+            context_limit: Some(262_144),
+            ..Default::default()
+        };
+        assert!(on_small.claims_1m_it_does_not_have());
+        assert!(!ModelEntry { context_limit: Some(262_144), ..Default::default() }
+            .claims_1m_it_does_not_have());
+        assert!(!ModelEntry {
+            to_1m: "auto".into(),
+            context_limit: Some(1_048_576),
+            ..Default::default()
+        }
+        .claims_1m_it_does_not_have());
+        assert!(!ModelEntry { to_1m: "auto".into(), ..Default::default() }
+            .claims_1m_it_does_not_have());
     }
 
     #[test]
@@ -290,11 +380,11 @@ mod tests {
     fn lookup_stays_inside_the_matched_provider() {
         let c = catalog();
         // 同一个模型名在别家可能是另一个价，认识服务商时绝不跨家找
-        assert_eq!(lookup(&c, "https://api.moonshot.cn/anthropic", "kimi-k2.6").unwrap().input, Some(0.95));
+        assert_eq!(lookup(&c, "https://api.moonshot.cn/anthropic", "kimi-k2.6").unwrap().pricing.input, Some(0.95));
         // Kimi Code 是订阅制（全 0），拿到的必须是它自己的 0，不能串成 Moonshot 的 0.95
-        assert_eq!(lookup(&c, "https://api.kimi.com/coding/", "kimi-k2.6").unwrap().input, Some(0.0));
+        assert_eq!(lookup(&c, "https://api.kimi.com/coding/", "kimi-k2.6").unwrap().pricing.input, Some(0.0));
         // [1m] 变体查的是裸模型名
-        assert_eq!(lookup(&c, "https://api.moonshot.cn/anthropic", "kimi-k2.6[1m]").unwrap().input, Some(0.95));
+        assert_eq!(lookup(&c, "https://api.moonshot.cn/anthropic", "kimi-k2.6[1m]").unwrap().pricing.input, Some(0.95));
         // 大小写不敏感
         assert!(lookup(&c, "https://api.moonshot.cn/anthropic", "KIMI-K2.6").is_some());
     }
@@ -307,7 +397,7 @@ mod tests {
         // 认出「这家所有模型都是 0」就能安全推断按 token 计费为 0 ——
         // 否则这个槽位会退回 Anthropic 官方价，也就是假账单。
         let c = catalog();
-        let p = lookup(&c, "https://api.kimi.com/coding/", "Kimi-k2.6").unwrap();
+        let p = lookup(&c, "https://api.kimi.com/coding/", "Kimi-k2.6").unwrap().pricing;
         assert_eq!(p.input, Some(0.0));
         assert_eq!(p.output, Some(0.0));
         assert_eq!(p.currency, "USD");
@@ -320,11 +410,18 @@ mod tests {
     fn unknown_provider_only_accepts_an_unambiguous_global_match() {
         let mut c = catalog();
         // 自定义 URL：全库唯一命中 → 采信
-        assert_eq!(lookup(&c, "https://my-relay.example.com", "deepseek-v4-pro").unwrap().input, Some(0.435));
+        assert_eq!(lookup(&c, "https://my-relay.example.com", "deepseek-v4-pro").unwrap().pricing.input, Some(0.435));
         // 两家报价不一致 → 宁可不显示，也不猜
         c.get_mut("kimi-for-coding").unwrap().insert(
             "deepseek-v4-pro".into(),
-            ModelPricing { input: Some(99.0), currency: "USD".into(), ..Default::default() },
+            ModelInfo {
+                pricing: ModelPricing {
+                    input: Some(99.0),
+                    currency: "USD".into(),
+                    ..Default::default()
+                },
+                context: None,
+            },
         );
         assert_eq!(lookup(&c, "https://my-relay.example.com", "deepseek-v4-pro"), None);
         assert_eq!(lookup(&c, "https://my-relay.example.com", "查无此模型"), None);

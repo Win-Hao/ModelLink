@@ -45,7 +45,7 @@ export function RecentRequests() {
             <span
               className={cn(
                 "size-1.5 flex-none rounded-full",
-                l.status === 200 ? "bg-success" : "bg-destructive",
+                l.status === 200 && !l.error ? "bg-success" : "bg-destructive",
               )}
             />
             <span className="flex min-w-0 flex-1 items-center">
@@ -56,10 +56,22 @@ export function RecentRequests() {
                 {THINKING_TAGS[l.thinking]}
               </span>
             )}
+            {l.note && (
+              <span
+                className={cn(
+                  "flex-none rounded-[5px] border px-1.5 py-px text-[10px]",
+                  l.error
+                    ? "border-destructive/30 bg-destructive-soft text-destructive"
+                    : "border-success/30 bg-success-soft text-success",
+                )}
+              >
+                {l.note}
+              </span>
+            )}
             <span
               className={cn(
                 "mono flex-none text-[11px]",
-                l.status === 200 ? "text-success" : "text-destructive",
+                l.status === 200 && !l.error ? "text-success" : "text-destructive",
               )}
             >
               {l.status}

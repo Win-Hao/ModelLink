@@ -41,11 +41,57 @@ if (params.has("dirty")) {
 }
 
 const logs: LogEntry[] = [
-  { time: "14:21:09", model: "kimi-k2.5", status: 200, thinking: "" },
-  { time: "14:25:31", model: "deepseek-v4-flash", status: 200, thinking: "" },
-  { time: "14:27:55", model: "deepseek-v4-flash", status: 502, thinking: "off" },
-  { time: "14:29:03", model: "kimi-k2.5[1m]", status: 200, thinking: "" },
-  { time: "14:32:47", model: "deepseek-v4-pro", status: 200, thinking: "max" },
+  { time: "14:21:09", model: "kimi-k2.5", status: 200, thinking: "", note: "", error: false },
+  {
+    time: "14:25:31",
+    model: "deepseek-v4-flash",
+    status: 200,
+    thinking: "",
+    note: "",
+    error: false,
+  },
+  {
+    time: "14:27:55",
+    model: "deepseek-v4-flash",
+    status: 502,
+    thinking: "off",
+    note: "",
+    error: false,
+  },
+  { time: "14:29:03", model: "kimi-k2.5[1m]", status: 200, thinking: "", note: "", error: false },
+  // 2.1-A：桌面端 5 档透传 + effort 整流 + 未映射槽位三种新形态
+  {
+    time: "14:30:12",
+    model: "deepseek-v4-pro",
+    status: 200,
+    thinking: "xhigh",
+    note: "",
+    error: false,
+  },
+  {
+    time: "14:31:20",
+    model: "MiniMax-M2.7",
+    status: 200,
+    thinking: "",
+    note: "已自动修复：effort 不支持",
+    error: false,
+  },
+  {
+    time: "14:32:05",
+    model: "claude-3-5-haiku-latest",
+    status: 400,
+    thinking: "",
+    note: "未映射槽位",
+    error: true,
+  },
+  {
+    time: "14:32:47",
+    model: "deepseek-v4-pro",
+    status: 200,
+    thinking: "max",
+    note: "",
+    error: false,
+  },
 ];
 
 function mockHash(c: Config): string {

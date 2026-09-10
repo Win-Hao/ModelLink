@@ -36,7 +36,12 @@ export type LogEntry = {
   time: string;
   model: string;
   status: number;
+  /** 实际发给上游的推理强度（""=未发 / "off" / low…max）。 */
   thinking: string;
+  /** 附注：整流标记 / 未映射槽位等，多条以 " · " 连接。 */
+  note: string;
+  /** ModelLink 自己判定为错误的请求（标红）。 */
+  error: boolean;
 };
 
 export type TestResult = { ok: boolean; message: string };

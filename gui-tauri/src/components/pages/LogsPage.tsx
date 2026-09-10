@@ -57,7 +57,7 @@ export function LogsPage() {
                   <span
                     className={cn(
                       "size-1.5 flex-none rounded-full",
-                      l.status === 200 ? "bg-success" : "bg-destructive",
+                      l.status === 200 && !l.error ? "bg-success" : "bg-destructive",
                     )}
                   />
                   <span className="min-w-0 flex-1 truncate font-semibold text-foreground">
@@ -68,10 +68,23 @@ export function LogsPage() {
                       {THINKING_TAGS[l.thinking]}
                     </span>
                   )}
+                  {/* 2.1-A：整流标记 / 未映射槽位等附注 */}
+                  {l.note && (
+                    <span
+                      className={cn(
+                        "flex-none rounded-[5px] border px-1.5 py-px font-sans text-[10px] font-normal",
+                        l.error
+                          ? "border-destructive/30 bg-destructive-soft text-destructive"
+                          : "border-success/30 bg-success-soft text-success",
+                      )}
+                    >
+                      {l.note}
+                    </span>
+                  )}
                   <span
                     className={cn(
                       "flex-none",
-                      l.status === 200 ? "text-success" : "text-destructive",
+                      l.status === 200 && !l.error ? "text-success" : "text-destructive",
                     )}
                   >
                     {l.status}

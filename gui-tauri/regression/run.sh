@@ -2,9 +2,12 @@
 # 新旧代理逐字节等价回归（docs/gui-rebuild-tauri.md §9/§10 的抓包对比项）。
 #
 # 原理：temp HOME 隔离真实配置 → 假上游（upstream.py）捕获代理转发的
-# method/path/headers/body → 对新旧两个二进制发同一组请求（drive.sh）→ 逐项 diff。
-# 覆盖：/v1/models 格式、4 种 thinking 态注入、[1m] 变体、fallback、头透传、
+# method/path/headers/body → 对新旧两个二进制发同一组请求（drive.sh）→ 按用例 diff。
+# 覆盖：/v1/models 格式、thinking 态注入、[1m] 变体、头透传、
 # 路径拼接、404/502 话术、Claude-3p 网关写入、LaunchAgent 迁移。
+#
+# 2.1-A 起「与 v1 逐字节等价」不再是全量目标：DIVERGE 表里的用例是**有意**不等价的
+# 行为改动，对它们改为断言新行为（见下方 python 段）。表外的用例仍须逐字节一致。
 #
 # 用法：OLD_BIN=<v1 可执行> NEW_BIN=<v2 可执行> bash regression/run.sh
 #   v1 二进制取自仓库根 ModelLink-macOS.zip（或 GitHub v1.2.0 release）：
@@ -69,9 +72,100 @@ run_one new "$NEW_BIN" "$EQ/home-new"
 
 fail=0
 echo
-echo "=== DIFF 上游捕获（转发字节等价核心） ==="
+echo "=== 上游捕获：表外用例逐字节等价 + DIVERGE 用例断言新行为 ==="
 [ -s "$EQ/cap-old.jsonl" ] || { echo "✗ 老版捕获为空"; fail=1; }
-if diff "$EQ/cap-old.jsonl" "$EQ/cap-new.jsonl"; then echo "✓ 上游捕获逐字节一致 ($(wc -l < "$EQ/cap-old.jsonl") 条)"; else fail=1; fi
+if python3 - "$EQ" <<'PY'
+import json, sys, pathlib
+
+eq = pathlib.Path(sys.argv[1])
+
+# 2.1-A 有意不等价的用例 → 对新版断言新行为，不与 v1 比对
+DIVERGE = {
+    "slot1-off-with-effort": "§3.10 桌面端已指定 effort，服务商级 off 不参与",
+    "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
+    "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
+    "effort-reject-2":       "§3.11.1 能力缓存命中，effort 直接不发",
+}
+
+def load(label):
+    out = {}
+    for line in (eq / f"cap-{label}.jsonl").read_text().splitlines():
+        rec = json.loads(line)
+        tag = ((rec.get("body") or {}).get("metadata") or {}).get("user_id", "(untagged)")
+        out.setdefault(tag, []).append(rec)
+    return out
+
+old, new = load("old"), load("new")
+fails = 0
+
+# ---- 表外用例：逐字节等价 ----
+same = sorted((set(old) | set(new)) - set(DIVERGE))
+for tag in same:
+    o, n = old.get(tag, []), new.get(tag, [])
+    if o == n:
+        print(f"✓ {tag}: 与 v1 一致（{len(n)} 次转发）")
+    else:
+        print(f"✗ {tag}: 与 v1 不一致")
+        print(f"    old={json.dumps(o, ensure_ascii=False, sort_keys=True)}")
+        print(f"    new={json.dumps(n, ensure_ascii=False, sort_keys=True)}")
+        fails += 1
+
+def check(tag, cond, what):
+    global fails
+    print(("✓ " if cond else "✗ ") + f"{tag}: {what}")
+    if not cond:
+        got = json.dumps(new.get(tag), ensure_ascii=False, sort_keys=True)
+        print(f"    实际: {got}")
+        fails += 1
+
+# ---- DIVERGE 用例：断言新行为 ----
+print(f"-- DIVERGE（{len(DIVERGE)} 项有意改动） --")
+
+# §3.10 服务商 te=off + 请求自带 effort → 原样透传，thinking 不写 disabled
+t = "slot1-off-with-effort"
+b = (new.get(t) or [{}])[0].get("body", {})
+check(t, len(new.get(t, [])) == 1
+         and b.get("output_config") == {"effort": "low"}
+         and "thinking" not in b,
+      "effort 透传、未写 thinking:disabled（v1 会踩掉）")
+
+# §3.10 服务商 te=high + 请求自带 effort/adaptive → 两者都不动
+t = "slot2-passthrough"
+b = (new.get(t) or [{}])[0].get("body", {})
+check(t, len(new.get(t, [])) == 1
+         and b.get("output_config") == {"effort": "low"}
+         and b.get("thinking") == {"type": "adaptive"},
+      "effort 与 adaptive 思考均原样透传（v1 会覆盖成 enabled+8192/high）")
+
+# §3.11.1 首发被拒 → 去掉 output_config 重试一次
+t = "effort-reject-1"
+recs = new.get(t, [])
+check(t, len(recs) == 2
+         and "output_config" in recs[0].get("body", {})
+         and "output_config" not in recs[1].get("body", {}),
+      "两次转发：第一次带 effort 被拒，第二次去掉后成功")
+
+# §3.11.1 副作用：能力缓存命中，后续请求直接不发 effort
+t = "effort-reject-2"
+recs = new.get(t, [])
+check(t, len(recs) == 1 and "output_config" not in recs[0].get("body", {}),
+      "只有一次转发且不带 effort（能力缓存生效）")
+
+sys.exit(1 if fails else 0)
+PY
+then :; else fail=1; fi
+
+echo "=== 新行为响应断言（2.1-A） ==="
+if [ "$(cat "$EQ/out-new/rectify.status")" = "200" ] && grep -q '"text": *"ok"\|"text":"ok"' "$EQ/out-new/rectify.body"; then
+  echo "✓ 整流后对下游返回 200（桌面端看不到上游那个 400，也就不会锁会话）"
+else
+  echo "✗ 整流后响应异常: $(cat "$EQ/out-new/rectify.status") $(cat "$EQ/out-new/rectify.body")"; fail=1
+fi
+if [ "$(cat "$EQ/out-old/rectify.status")" = "400" ]; then
+  echo "✓ 对照：v1 把上游 400 原样吐给桌面端"
+else
+  echo "✗ 对照失败：v1 的 rectify.status = $(cat "$EQ/out-old/rectify.status")"; fail=1
+fi
 echo "=== DIFF /v1/models ==="
 if diff "$EQ/out-old/models.json" "$EQ/out-new/models.json"; then echo "✓ /v1/models 一致"; else fail=1; fi
 echo "=== DIFF 响应（状态码/透传体/404/502 话术） ==="

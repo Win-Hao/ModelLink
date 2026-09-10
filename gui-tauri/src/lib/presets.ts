@@ -125,11 +125,18 @@ export const THINKING_LABELS: Record<string, string> = {
   max: "深度 (max)",
 };
 
-/** 请求日志 / 链路 chip 上的思考标签（design.md §6.3）。 */
+/**
+ * 请求日志 / 链路 chip 上的思考标签（design.md §6.3）。
+ * low/medium/xhigh 来自 Claude Desktop 原生 5 档选择器的透传值（2.1-A §3.10），
+ * 桌面端 UI 上 xhigh 显示为 Extra。
+ */
 export const THINKING_TAGS: Record<string, string> = {
   "": "默认",
   off: "思考关",
+  low: "轻度",
+  medium: "中等",
   high: "标准",
+  xhigh: "超高",
   max: "深度",
 };
 

@@ -245,10 +245,16 @@ export function ProviderEditor({ index }: { index: number }) {
         </Button>
       )}
 
-      {/* 底行：推理强度 + 删除服务商 */}
-      <div className="mt-0.5 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <label className="text-[11px] font-medium text-muted-foreground">推理强度</label>
+      {/* 底行：默认推理强度 + 删除服务商 */}
+      <div className="mt-0.5 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-muted-foreground">默认推理强度</div>
+            {/* 2.1-A §3.10：语义从「强制」降级为「默认档位」 */}
+            <div className="mt-px truncate text-[10.5px] text-faint">
+              桌面端选择器优先；此处仅在桌面端未指定时生效
+            </div>
+          </div>
           <Select
             value={p.thinking_effort === "" ? "default" : p.thinking_effort}
             onValueChange={(v) =>

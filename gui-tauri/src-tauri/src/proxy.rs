@@ -251,10 +251,14 @@ pub(crate) fn inject_thinking(data: &mut serde_json::Value, te: &str) -> String 
         _ => data["output_config"] = serde_json::json!({"effort": te}),
     }
     // 绝不覆盖请求里已有的 thinking（尤其 {"type":"adaptive"}）。
-    // budget_tokens 与 effort 语义重叠、对 1M 上下文模型也偏小，
-    // 只在这条兜底路径、且请求完全没带 thinking 时才写。
+    // 请求完全没带 thinking 时补一个 —— 补的是**桌面端同款形态**（§5.5.2 抓包：
+    // output_config.effort 与 thinking:{"type":"adaptive"} 成对出现）。
+    //
+    // 这里曾经写死 {"type":"enabled","budget_tokens":8192}：那个数字在 v1 代码里是
+    // 个没有出处的裸字面量，与 effort 语义重叠，对 1M 上下文模型也明显偏小。
+    // adaptive 把「想多久」交回给上游，既不用编数字，也和桌面端保持一致。
     if data.get("thinking").is_none() {
-        data["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 8192});
+        data["thinking"] = serde_json::json!({"type": "adaptive"});
     }
     eprintln!("  thinking_effort: {} (服务商默认)", te);
     te.to_string()
@@ -436,13 +440,19 @@ pub(crate) fn budget_rectifier_applies(status: u16, msg: &str, data: &serde_json
     if !(400..500).contains(&status) {
         return false;
     }
-    if data.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("adaptive")
-    {
-        return false;
-    }
     let m = msg.to_ascii_lowercase();
-    let has_budget = m.contains("budget_tokens") || m.contains("budget tokens");
     let has_thinking = m.contains("thinking");
+    let is_adaptive =
+        data.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("adaptive");
+
+    if is_adaptive {
+        // 自适应思考没有 budget 概念，抱怨 budget 下限时改它反而报新错。
+        // 但上游若是**不认 adaptive 这个形态**，就得给它一个显式预算 ——
+        // 兜底注入改发 adaptive（与桌面端一致）之后，这条路才有可能被走到。
+        return has_thinking && m.contains("adaptive");
+    }
+
+    let has_budget = m.contains("budget_tokens") || m.contains("budget tokens");
     let has_min = m.contains("greater than or equal to 1024")
         || m.contains(">= 1024")
         || (m.contains("1024") && m.contains("input should be"));
@@ -1057,15 +1067,46 @@ mod tests {
         let tag = inject_thinking(&mut data, "high");
         assert_eq!(tag, "high");
         assert_eq!(data["output_config"], serde_json::json!({"effort": "high"}));
-        // 请求完全没带 thinking 时才补 budget_tokens 兜底
-        assert_eq!(
-            data["thinking"],
-            serde_json::json!({"type": "enabled", "budget_tokens": 8192})
-        );
+        // 请求完全没带 thinking 时，补的是**桌面端同款形态**：自适应。
+        // 不写 budget_tokens —— 任何具体数字都是编的，而 adaptive 让上游自己决定。
+        assert_eq!(data["thinking"], serde_json::json!({"type": "adaptive"}));
 
         let mut data = serde_json::json!({"model": "m"});
         assert_eq!(inject_thinking(&mut data, "max"), "max");
         assert_eq!(data["output_config"], serde_json::json!({"effort": "max"}));
+    }
+
+    #[test]
+    fn fallback_injection_mirrors_what_the_desktop_actually_sends() {
+        // §5.5.2 抓包：output_config={'effort': X} + thinking={'type': 'adaptive'}
+        let mut data = serde_json::json!({"model": "m", "max_tokens": 64000});
+        inject_thinking(&mut data, "xhigh");
+        assert_eq!(
+            data,
+            serde_json::json!({
+                "model": "m",
+                "max_tokens": 64000,
+                "output_config": {"effort": "xhigh"},
+                "thinking": {"type": "adaptive"}
+            })
+        );
+    }
+
+    #[test]
+    fn upstream_rejecting_adaptive_falls_back_to_an_explicit_budget() {
+        // 兜底改发 adaptive 后多了一种可能的上游拒收；§3.11.2 顺带接住它
+        let d = serde_json::json!({"thinking": {"type": "adaptive"}});
+        assert!(budget_rectifier_applies(400, "thinking: adaptive is not supported", &d));
+        let mut d = serde_json::json!({"max_tokens": 4096, "thinking": {"type": "adaptive"}});
+        assert!(apply_budget_fix(&mut d));
+        assert_eq!(d["thinking"], serde_json::json!({"type": "enabled", "budget_tokens": 32000}));
+        // 但抱怨 budget 下限时仍然不该动 adaptive 请求（改了反而报新错）
+        let d = serde_json::json!({"thinking": {"type": "adaptive"}});
+        assert!(!budget_rectifier_applies(
+            400,
+            "thinking.budget_tokens: Input should be greater than or equal to 1024",
+            &d
+        ));
     }
 
     // 兜底注入也绝不覆盖请求里已有的 thinking（尤其 adaptive）。

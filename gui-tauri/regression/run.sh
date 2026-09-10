@@ -100,6 +100,8 @@ eq = pathlib.Path(sys.argv[1])
 # 2.1-A 有意不等价的用例 → 对新版断言新行为，不与 v1 比对
 DIVERGE = {
     "slot1-off-with-effort": "§3.10 桌面端已指定 effort，服务商级 off 不参与",
+    "slot2-high":            "§3.10 兜底注入改发 adaptive，不再写死 budget 8192",
+    "slot3-max-headers":     "§3.10 同上（顺带验头透传）",
     "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
     "unmapped":              "§3.3 未映射槽位不再静默回落",
     "slow-stream":           "§3.2 沉默的流式上游：新版插心跳，v1 纯直通",
@@ -166,6 +168,21 @@ check(t, len(new.get(t, [])) == 1
 t = "unmapped"
 check(t, not new.get(t) and len(old.get(t, [])) == 1,
       "未转发到上游（v1 静默回落到第一个模型）")
+
+# §3.10 兜底注入：与桌面端同款形态（effort + adaptive），不再写死 budget_tokens。
+# v1 写的是 {"type":"enabled","budget_tokens":8192} —— 一个没有出处的裸字面量。
+for t, effort in (("slot2-high", "high"), ("slot3-max-headers", "max")):
+    recs = new.get(t, [])
+    b = (recs or [{}])[0].get("body", {})
+    ok = (len(recs) == 1
+          and b.get("output_config") == {"effort": effort}
+          and b.get("thinking") == {"type": "adaptive"}
+          and old.get(t, [{}])[0].get("body", {}).get("thinking", {}).get("budget_tokens") == 8192)
+    check(t, ok, f"effort={effort} + adaptive；v1 对照写的是 enabled+8192")
+    # 头透传仍须与 v1 一致（这条没变）
+    if t == "slot3-max-headers" and recs:
+        same_headers = recs[0]["headers"] == old.get(t, [{}])[0].get("headers")
+        check(t + "/headers", same_headers, "请求头与 v1 逐字节一致")
 
 # §5.5.4 标题生成：降到 effort=low + thinking disabled（v1 原样转发）
 t = "title-gen"

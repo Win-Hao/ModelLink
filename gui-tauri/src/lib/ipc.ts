@@ -18,16 +18,8 @@ export type ModelEntry = {
   name: string;
   /** 非空（v1 里为 "auto"）表示该模型开启 1M 上下文变体。 */
   to_1m: string;
-  /** 用户手填的费率；有内容时完全接管，不与同步值合并。 */
-  pricing?: ModelPricing;
   /** 从 models.dev 同步来的费率（USD/百万 token），后端专管，界面只读。 */
   pricing_synced?: ModelPricing;
-  /** 该条为默认模型时，1M 变体成为选择器默认项（需开启 1M）。 */
-  prefer_1m?: boolean;
-  /** 层级别名：sonnet/opus/haiku/fable/mythos，空 = 不设。 */
-  family_tier?: string;
-  /** 同层级多条时指定哪条接管别名（需先设层级）。 */
-  family_default?: boolean;
   /** 上游该模型的最大上下文（token），由 models.dev 同步填，界面只读。 */
   context_limit?: number;
 };
@@ -83,26 +75,6 @@ export type LogEntry = {
 
 export type TestResult = { ok: boolean; message: string };
 
-/** 服务商能力探针结果（§5.6）。 */
-export type ProbeReport = {
-  ok: boolean;
-  message: string;
-  models_endpoint: boolean;
-  upstream_efforts: string[];
-  /** false = 这家会静默回落到默认模型。 */
-  validates_model_name: boolean;
-  accepts_claude_slot: boolean;
-  effort_accepted: [string, boolean][];
-  /** 各档位实测思考 token 数；只有拉开差距才是「真的生效」的实证。 */
-  effort_thinking: [string, number][];
-  thinking_variants: [string, boolean][];
-  prompt_caching: boolean;
-  accepts_1m_beta: boolean;
-  elapsed_ms: number;
-};
-
-export type ProbeResponse = { report: ProbeReport; headlines: string[] };
-
 export const guiVersion = () => invoke<string>("gui_version");
 export const getConfig = () => invoke<Config>("get_config");
 /** 返回后端合并「后端专管」字段后的那份配置 —— 前端应据它算 dirty。 */
@@ -110,8 +82,6 @@ export const saveConfig = (config: Config) => invoke<Config>("save_config", { co
 export const configHash = (config: Config) => invoke<string>("config_hash", { config });
 export const testProvider = (targetUrl: string, apiKey: string, model: string) =>
   invoke<TestResult>("test_provider", { targetUrl, apiKey, model });
-export const probeProvider = (targetUrl: string, apiKey: string, model: string) =>
-  invoke<ProbeResponse>("probe_provider", { targetUrl, apiKey, model });
 export const applyToClaude = () => invoke<string>("apply_to_claude");
 export const getLogs = () => invoke<LogEntry[]>("get_logs");
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");

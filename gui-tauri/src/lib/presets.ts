@@ -7,9 +7,6 @@ import type { Config } from "@/lib/ipc";
 /** 镜像后端 config.rs::MAX_MODELS（2.1-B §3.6：8 → 20）。 */
 export const MAX_MODELS = 20;
 
-/** 镜像后端 config.rs::FAMILY_TIERS（app.asar 里的 Ba 数组，§3.5）。 */
-export const FAMILY_TIERS = ["sonnet", "opus", "haiku", "fable", "mythos"] as const;
-
 /** 「1M 上下文」的判定门槛：各家数字不一（Kimi 1048576 / 智谱 1000000），取下限。 */
 export const ONE_M_CONTEXT = 1_000_000;
 

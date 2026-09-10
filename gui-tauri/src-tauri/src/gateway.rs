@@ -256,27 +256,11 @@ pub fn ensure_claude_desktop_gateway(port: u16) {
 fn inference_models_entries(flat: &[crate::config::FlatEntry]) -> Vec<serde_json::Value> {
     flat.iter()
         .map(|e| {
-            let supports_1m = !e.to_1m.is_empty();
-            let mut row = serde_json::Map::new();
-            row.insert("name".into(), serde_json::json!(e.slot));
-            row.insert("supports1m".into(), serde_json::json!(supports_1m));
-            row.insert("labelOverride".into(), serde_json::json!(e.name));
-            // 2.1-D §3.5：以下三个字段没设就一个都不写。
-            // app.asar 里它们各有 show 谓词：prefer1m 要 supports1m，
-            // isFamilyDefault 要 anthropicFamilyTier —— 这里照同样的条件把无效组合挡掉。
-            if e.prefer_1m && supports_1m {
-                row.insert("prefer1m".into(), serde_json::json!(true));
-            }
-            // app 内是枚举校验（Rn(Ba)，且会先 trim + 小写）。config.json 可以手改，
-            // 写进去一个不在表里的值会让整个配置被拒 —— 这里先自己滤一道。
-            let tier = e.family_tier.trim().to_ascii_lowercase();
-            if crate::config::FAMILY_TIERS.contains(&tier.as_str()) {
-                row.insert("anthropicFamilyTier".into(), serde_json::json!(tier));
-                if e.family_default {
-                    row.insert("isFamilyDefault".into(), serde_json::json!(true));
-                }
-            }
-            serde_json::Value::Object(row)
+            serde_json::json!({
+                "name": e.slot,
+                "supports1m": !e.to_1m.is_empty(),
+                "labelOverride": e.name,
+            })
         })
         .collect()
 }
@@ -379,8 +363,12 @@ fn inference_model_pricing_entries(flat: &[crate::config::FlatEntry]) -> Vec<ser
 /// （`inferenceModelPricing*` 1.37937.0 起支持；按版本门槛跳过写入属于 §3.8，排在 E 批。）
 fn write_pricing_keys(existing: &mut serde_json::Value, flat: &[crate::config::FlatEntry]) {
     let rows = inference_model_pricing_entries(flat);
-    existing["inferenceModelPricingEnabled"] = serde_json::json!(!rows.is_empty());
-    existing["inferenceModelPricing"] = serde_json::json!(rows);
+    // ⚠️ **所有**已路由模型都有价才开。只要有一个没价，那一条就会退回按 Anthropic
+    // 官方价估算（费率注解：内置 Claude ID 也覆盖其带日期/服务商的形态）——
+    // 一份半真半假的账单比不显示费用更糟，而且现在没有手填入口可以补救。
+    let all_priced = !flat.is_empty() && rows.len() == flat.len();
+    existing["inferenceModelPricingEnabled"] = serde_json::json!(all_priced);
+    existing["inferenceModelPricing"] = serde_json::json!(if all_priced { rows } else { Vec::new() });
 }
 
 pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
@@ -733,93 +721,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn model_entries_carry_tier_and_prefer1m_only_when_set() {
-        let cfg = cfg_with(vec![
-            ModelEntry {
-                name: "Kimi-k2.6".into(),
-                to_1m: "auto".into(),
-                prefer_1m: true,
-                family_tier: "opus".into(),
-                family_default: true,
-                ..Default::default()
-            },
-            ModelEntry { name: "plain".into(), ..Default::default() },
-        ]);
-        let e = inference_models_entries(&flatten_config(&cfg));
-        assert_eq!(
-            e[0],
-            serde_json::json!({
-                "name": "claude-opus-5",
-                "supports1m": true,
-                "labelOverride": "Kimi-k2.6",
-                "prefer1m": true,
-                "anthropicFamilyTier": "opus",
-                "isFamilyDefault": true,
-            })
-        );
-        // 没设的字段一个都不写 —— 老版 Claude 见到未知键会忽略，但空值可能触发 schema
-        assert_eq!(
-            e[1],
-            serde_json::json!({
-                "name": "claude-sonnet-5",
-                "supports1m": false,
-                "labelOverride": "plain",
-            })
-        );
-    }
-
-    #[test]
-    fn prefer1m_is_dropped_without_supports1m() {
-        // app.asar：prefer1m 的 show 谓词是 !!e.supports1m —— 没有 1M 变体时它无意义
-        let cfg = cfg_with(vec![ModelEntry {
-            name: "m".into(),
-            to_1m: String::new(),
-            prefer_1m: true,
-            ..Default::default()
-        }]);
-        let e = inference_models_entries(&flatten_config(&cfg));
-        assert!(e[0].get("prefer1m").is_none());
-    }
-
-    #[test]
-    fn unknown_tier_values_are_dropped_rather_than_written() {
-        // config.json 可以手改；写进一个不在枚举里的值会让整个配置被 app 拒掉
-        let cfg = cfg_with(vec![ModelEntry {
-            name: "m".into(),
-            family_tier: "超级模型".into(),
-            family_default: true,
-            ..Default::default()
-        }]);
-        let e = inference_models_entries(&flatten_config(&cfg));
-        assert!(e[0].get("anthropicFamilyTier").is_none());
-        assert!(e[0].get("isFamilyDefault").is_none());
-    }
-
-    #[test]
-    fn tier_values_are_trimmed_and_lowercased_like_the_app_does() {
-        let cfg = cfg_with(vec![ModelEntry {
-            name: "m".into(),
-            family_tier: "  OPUS  ".into(),
-            ..Default::default()
-        }]);
-        let e = inference_models_entries(&flatten_config(&cfg));
-        assert_eq!(e[0]["anthropicFamilyTier"], "opus");
-    }
-
-    #[test]
-    fn family_default_is_dropped_without_a_tier() {
-        // app.asar：isFamilyDefault 的 show 谓词是 !!e.anthropicFamilyTier
-        let cfg = cfg_with(vec![ModelEntry {
-            name: "m".into(),
-            family_default: true,
-            ..Default::default()
-        }]);
-        let e = inference_models_entries(&flatten_config(&cfg));
-        assert!(e[0].get("isFamilyDefault").is_none());
-        assert!(e[0].get("anthropicFamilyTier").is_none());
-    }
-
     // ---- §3.7 organizationInstructions ----
 
     #[test]
@@ -851,7 +752,7 @@ mod tests {
         ModelEntry {
             name: name.into(),
             to_1m: String::new(),
-            pricing: Some(ModelPricing {
+            pricing_synced: Some(ModelPricing {
                 input: Some(input),
                 output: Some(output),
                 ..Default::default()
@@ -917,12 +818,12 @@ mod tests {
         let cfg = cfg_with(vec![
             ModelEntry {
                 name: "only-cache".into(),
-                pricing: Some(ModelPricing { cache_read: Some(0.8), ..Default::default() }),
+                pricing_synced: Some(ModelPricing { cache_read: Some(0.8), ..Default::default() }),
                 ..Default::default()
             },
             ModelEntry {
                 name: "only-input".into(),
-                pricing: Some(ModelPricing { input: Some(4.0), ..Default::default() }),
+                pricing_synced: Some(ModelPricing { input: Some(4.0), ..Default::default() }),
                 ..Default::default()
             },
         ]);
@@ -934,7 +835,7 @@ mod tests {
         // schema 值域 [0, 10000]；越界的一行会让整张表失效，宁可钳住
         let cfg = cfg_with(vec![ModelEntry {
             name: "m".into(),
-            pricing: Some(ModelPricing {
+            pricing_synced: Some(ModelPricing {
                 input: Some(999_999.0),
                 output: Some(-5.0),
                 cache_read: Some(0.0),
@@ -954,7 +855,7 @@ mod tests {
             ModelEntry {
                 name: "full".into(),
                 to_1m: String::new(),
-                pricing: Some(ModelPricing {
+                pricing_synced: Some(ModelPricing {
                     input: Some(4.0),
                     output: Some(16.0),
                     cache_read: Some(0.8),
@@ -965,7 +866,7 @@ mod tests {
             ModelEntry {
                 name: "empty-price".into(),
                 to_1m: String::new(),
-                pricing: Some(ModelPricing::default()),
+                pricing_synced: Some(ModelPricing::default()),
                 ..Default::default()
             },
         ]);
@@ -1011,9 +912,6 @@ mod tests {
 
         let mut first = priced("Kimi-k2.6", 4.0, 16.0);
         first.to_1m = "auto".into();
-        first.prefer_1m = true;
-        first.family_tier = "opus".into();
-        first.family_default = true;
         let mut cfg = cfg_with(vec![
             first,
             ModelEntry { name: "no-price".into(), ..Default::default() },
@@ -1036,10 +934,30 @@ mod tests {
         assert_eq!(models[0]["name"], "claude-opus-5");
         assert_eq!(models[1]["name"], "claude-sonnet-5");
 
-        // 费率：定了价的成行，四字段齐全且都在 schema 值域内；没定价的不出现
+        // 有一个模型没价 → 整张表不开（半真半假的账单比不显示更糟）
+        assert_eq!(written["inferenceModelPricingEnabled"], false);
+        assert!(written["inferenceModelPricing"].as_array().unwrap().is_empty());
+
+        // 全部都有价时才写出完整的四字段行
+        let mut all = cfg.clone();
+        all.providers[0].models[1].pricing_synced = Some(ModelPricing {
+            input: Some(1.0),
+            output: Some(2.0),
+            ..Default::default()
+        });
+        apply_to_claude_desktop(&all).unwrap();
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                claude_3p_dir()
+                    .unwrap()
+                    .join("configLibrary/a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(written["inferenceModelPricingEnabled"], true);
         let rows = written["inferenceModelPricing"].as_array().unwrap();
-        assert_eq!(rows.len(), 1, "no-price 那条不该有费率行");
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["name"], "claude-opus-5");
         for k in ["inputPerMtok", "outputPerMtok", "cacheReadPerMtok", "cacheWritePerMtok"] {
             let v = rows[0][k].as_f64().unwrap_or_else(|| panic!("{k} 缺失或不是数字"));
@@ -1047,14 +965,7 @@ mod tests {
         }
         assert_eq!(rows[0]["inputPerMtok"], 4.0);
 
-        // §3.5 模型条目进阶字段：设了的写、没设的不写
-        assert_eq!(models[0]["prefer1m"], true);
-        assert_eq!(models[0]["anthropicFamilyTier"], "opus");
-        assert_eq!(models[0]["isFamilyDefault"], true);
-        assert!(models[1].get("prefer1m").is_none());
-        assert!(models[1].get("anthropicFamilyTier").is_none());
-
-        // §3.7 组织级指令：兜底说明在前、用户文本原样在后，且不超 3000
+        // §3.7 组织级指令：槽位映射说明，且不超 3000
         let org = written["organizationInstructions"].as_str().unwrap();
         assert!(org.contains("claude-opus-5 = Kimi-k2.6"), "{org}");
         assert!(org.encode_utf16().count() <= ORG_INSTRUCTIONS_MAX);

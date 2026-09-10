@@ -486,26 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_catalog_never_touches_hand_entered_pricing() {
-        let manual = ModelPricing { input: Some(1.23), ..Default::default() };
-        let mut cfg = Config {
-            providers: vec![Provider {
-                target_url: "https://api.moonshot.cn/anthropic".into(),
-                api_key: "k".into(),
-                models: vec![ModelEntry {
-                    name: "kimi-k2.6".into(),
-                    pricing: Some(manual.clone()),
-                    ..Default::default()
-                }],
-                thinking_effort: String::new(),
-            }],
-            ..Default::default()
-        };
-        apply_catalog(&mut cfg, &catalog());
-        assert_eq!(cfg.providers[0].models[0].pricing, Some(manual));
-    }
-
-    #[test]
     fn synced_pricing_survives_a_stale_draft_being_saved() {
         let synced = ModelPricing { input: Some(0.95), ..Default::default() };
         let mk = |sync: Option<ModelPricing>| Config {

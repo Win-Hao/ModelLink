@@ -76,10 +76,6 @@ fn is_default_port(p: &u16) -> bool {
     *p == DEFAULT_PORT
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
 fn default_true() -> bool {
     true
 }
@@ -154,31 +150,11 @@ pub struct ModelEntry {
     pub name: String,
     #[serde(default)]
     pub to_1m: String,
-    /// 2.1-B 新增（§3.1）：该模型的费率。None = 没填。
-    ///
-    /// ⚠️ 不填是有代价的：槽位名借用了真实 Claude 型号，费率注解写明
-    /// "A built-in Claude ID also covers its dated and provider forms" ——
-    /// 没有覆盖行时引擎会**按 Anthropic 官方价估算**，用户看到的是假账单。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pricing: Option<ModelPricing>,
     /// 从 models.dev 同步来的费率（USD/百万 token），由 `models_dev::apply_catalog` 维护，
     /// 用户不直接编辑。手填的 `pricing` 一旦有内容就完全接管，不与它逐字段合并 ——
     /// 同步值是美元、手填可能是人民币，混在一行里就是两种币种相加。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing_synced: Option<ModelPricing>,
-    /// 2.1-D 新增（§3.5）：该条为默认（首条）模型时，1M 变体成为选择器默认项。
-    /// 无 `to_1m` 时无效（app 内该字段的 show 谓词是 `!!e.supports1m`）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub prefer_1m: bool,
-    /// 2.1-D 新增（§3.5）：层级别名，把裸别名（如 `opus`）pin 到这条。
-    /// 取值 sonnet / opus / haiku / fable / mythos，空 = 不设。
-    /// opus 与 fable 还带 refusal fallback 链路。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub family_tier: String,
-    /// 2.1-D 新增（§3.5）：同层级有多条时，指定哪条接管别名（否则第一条胜出）。
-    /// 无 `family_tier` 时无效。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub family_default: bool,
     /// 2.1 新增：上游该模型的最大上下文（token），由 models.dev 同步填，用户不编辑。
     /// 用来判断「开着 1M 但这个模型根本装不下」。None = 未知，不下结论。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,8 +165,6 @@ pub struct ModelEntry {
 /// DeepSeek / 智谱 / 百炼是 1000000 —— 取 1000000 作为下限。
 pub const ONE_M_CONTEXT: u64 = 1_000_000;
 
-/// `anthropicFamilyTier` 的合法取值（app.asar 实测 `Ba` 数组）。
-pub const FAMILY_TIERS: &[&str] = &["sonnet", "opus", "haiku", "fable", "mythos"];
 
 /// 这个上下文上限装不装得下 1M。**未知（None）时返回 true** ——
 /// 只有明确知道装不下才提示用户，绝不因为 models.dev 缺一条数据就去质疑用户的设置。
@@ -208,12 +182,9 @@ pub fn claims_1m_without_it(to_1m: &str, limit: Option<u64>) -> bool {
 }
 
 impl ModelEntry {
-    /// 实际写进网关的费率：手填优先，否则用同步值。
+    /// 实际写进网关的费率（全部来自 models.dev 同步 —— 没有手填入口了）。
     pub fn effective_pricing(&self) -> Option<&ModelPricing> {
-        match self.pricing.as_ref().filter(|p| !p.is_empty()) {
-            Some(p) => Some(p),
-            None => self.pricing_synced.as_ref().filter(|p| !p.is_empty()),
-        }
+        self.pricing_synced.as_ref().filter(|p| !p.is_empty())
     }
 }
 
@@ -367,9 +338,6 @@ pub struct FlatEntry {
     pub key: String,
     pub thinking_effort: String,
     pub pricing: Option<ModelPricing>,
-    pub prefer_1m: bool,
-    pub family_tier: String,
-    pub family_default: bool,
     pub context_limit: Option<u64>,
 }
 
@@ -387,9 +355,6 @@ pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
                     key: provider.api_key.clone(),
                     thinking_effort: provider.thinking_effort.clone(),
                     pricing: m.effective_pricing().cloned(),
-                    prefer_1m: m.prefer_1m,
-                    family_tier: m.family_tier.clone(),
-                    family_default: m.family_default,
                     context_limit: m.context_limit,
                 });
                 count += 1;
@@ -707,7 +672,7 @@ mod tests {
             r#"{"providers":[{"target_url":"u","api_key":"k","models":[{"name":"m"}]}]}"#,
         )
         .unwrap();
-        assert_eq!(cfg.providers[0].models[0].pricing, None);
+        assert_eq!(cfg.providers[0].models[0].pricing_synced, None);
         // 没填费率 / 用默认汇率时，写出去的文件与 2.0 一模一样
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(!out.contains("pricing"), "{out}");
@@ -738,37 +703,6 @@ mod tests {
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
         a.providers[0].models[0].context_limit = Some(262_144);
         assert_ne!(canonical_hash(&a), canonical_hash(&sample_config()));
-    }
-
-    #[test]
-    fn hand_entered_pricing_wins_over_synced_wholesale() {
-        // 「手填后不再使用同步值」—— 不做逐字段合并：同步值是 USD、手填可能是人民币，
-        // 混在一行里就是两种币种相加，必错。
-        let manual = ModelPricing { input: Some(4.0), ..Default::default() };
-        let synced = ModelPricing {
-            input: Some(0.95),
-            output: Some(4.0),
-            ..Default::default()
-        };
-        let m = ModelEntry {
-            name: "m".into(),
-            to_1m: String::new(),
-            pricing: Some(manual.clone()),
-            pricing_synced: Some(synced.clone()),
-            ..Default::default()
-        };
-        assert_eq!(m.effective_pricing(), Some(&manual));
-
-        // 手填是空壳（点开过费率面板但一个字都没填）→ 仍然用同步值
-        let m = ModelEntry {
-            pricing: Some(ModelPricing::default()),
-            pricing_synced: Some(synced.clone()),
-            ..Default::default()
-        };
-        assert_eq!(m.effective_pricing(), Some(&synced));
-
-        // 都没有 → 没有
-        assert_eq!(ModelEntry::default().effective_pricing(), None);
     }
 
     #[test]

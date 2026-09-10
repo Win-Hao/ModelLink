@@ -136,51 +136,6 @@ pub async fn test_provider(
     }
 }
 
-/// 服务商能力探针（§5.6）：把「测试连接」从「通不通」升级成「支持到什么程度」。
-///
-/// 全部请求都是 max_tokens=1（缓存探测那两发带一段大 system，为的就是观察缓存），
-/// 独立分组并发发出，代价很小但比只发一个 ping 有用得多。
-#[tauri::command]
-pub async fn probe_provider(
-    state: State<'_, Arc<ProxyState>>,
-    target_url: String,
-    api_key: String,
-    model: String,
-) -> Result<ProbeResponse, String> {
-    if target_url.is_empty() || api_key.is_empty() || model.is_empty() {
-        return Ok(ProbeResponse {
-            report: crate::probe::ProbeReport {
-                message: "请填写 API 地址、密钥和至少一个模型名。".into(),
-                ..Default::default()
-            },
-            headlines: Vec::new(),
-        });
-    }
-    if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
-        return Ok(ProbeResponse {
-            report: crate::probe::ProbeReport {
-                message: "URL 需以 http:// 或 https:// 开头".into(),
-                ..Default::default()
-            },
-            headlines: Vec::new(),
-        });
-    }
-    let report = crate::probe::run(&state.client, &target_url, &api_key, &model).await;
-    let headlines = crate::probe::headlines(&report);
-    eprintln!(
-        "[probe] {} {} → ok={} {}ms",
-        target_url, model, report.ok, report.elapsed_ms
-    );
-    Ok(ProbeResponse { report, headlines })
-}
-
-#[derive(Serialize)]
-pub struct ProbeResponse {
-    pub report: crate::probe::ProbeReport,
-    /// 最值得当场告诉用户的几句结论。
-    pub headlines: Vec<String>,
-}
-
 /// 应用到 Claude Desktop：校验 → 写网关 → 更新 applied 哈希 → 重启 Claude。
 /// （前端在调用前先 flush 自动保存，保证 state 里是最新配置。）
 #[tauri::command]

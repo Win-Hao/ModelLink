@@ -844,6 +844,22 @@ effort 的投机分支排最后」，并单独钉了测试。
 「实测花掉 88 个思考 token」「1 token 的探活请求」「系统提示词里有一句
 You are a Claude agent」。那是写给开发者看的，用户做决定并不需要知道。
 
+### ⑭ 服务商编辑器再减负：删掉三个按钮（2026-09-10，用户拍板）
+
+| 按钮 | 连带删掉 | 影响 |
+|---|---|---|
+| **深度探测** | 整个 `probe.rs` + `probe_provider` 命令 + 结果面板 | 失去「一次问清这家支持到什么程度」的信息展示。连通性仍由「测试连接」覆盖；effort 支持与否仍由 §3.11.1 的整流器在运行时自学 |
+| **费率** | `ModelEntry.pricing`（手填）+ 费率面板 | 费率**全部来自 models.dev 同步**，没有手填覆盖入口了 |
+| **层级** | `prefer_1m` / `family_tier` / `family_default` + 层级面板 | §3.5 的三个模型条目字段不再写入，`inferenceModels` 回到 `{name, supports1m, labelOverride}` 三项 |
+
+**顺带收紧的一处**（因为手填入口没了）：`inferenceModelPricingEnabled` 原本是
+「有任意一行费率就开」。手填补救手段消失后，「部分模型有同步价、部分没有」的情况
+会让没价的那条退回 Anthropic 官方价 —— 半真半假的账单比不显示费用更糟。
+改为**所有已路由模型都有价才开**，否则整张表不写。
+
+`scripts/probe-provider.py` 保留 —— 它仍是接入新服务商时先跑一遍的工具，
+只是不再内置进界面。
+
 ### ⑫ Kimi 官方文档核实：只有 3 档，且换档会破前缀缓存
 
 `api.moonshot.cn/anthropic` 的 Messages API 文档里 `output_config.effort` 写明：

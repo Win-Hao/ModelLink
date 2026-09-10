@@ -14,7 +14,6 @@ mod config;
 mod desktop_version;
 mod gateway;
 mod models_dev;
-mod probe;
 mod proxy;
 
 use proxy::ProxyState;
@@ -193,7 +192,6 @@ pub fn run() {
             commands::save_config,
             commands::config_hash,
             commands::test_provider,
-            commands::probe_provider,
             commands::apply_to_claude,
             commands::get_logs,
             commands::proxy_status,

@@ -80,37 +80,20 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// 人民币兑美元汇率默认值（§五①）。汇率会过时，所以做成设置页可见可改的输入框，
-/// 而不是埋在代码里的常量。
-pub const DEFAULT_USD_RATE: f64 = 7.2;
-
-fn default_usd_rate() -> f64 {
-    DEFAULT_USD_RATE
-}
-
-fn is_default_usd_rate(r: &f64) -> bool {
-    *r == DEFAULT_USD_RATE
-}
-
 fn default_true() -> bool {
     true
-}
-
-/// SSE 心跳默认间隔（§3.2）。取 15s：远小于引擎约 5 分钟的「无声连接」判死线，
-/// 又不至于把日志刷满。
-pub const DEFAULT_HEARTBEAT_SECS: u64 = 15;
-
-fn default_heartbeat_secs() -> u64 {
-    DEFAULT_HEARTBEAT_SECS
-}
-
-fn is_default_heartbeat(v: &u64) -> bool {
-    *v == DEFAULT_HEARTBEAT_SECS
 }
 
 fn is_true(b: &bool) -> bool {
     *b
 }
+
+/// SSE 心跳间隔（§3.2）。取 15s：远小于引擎约 5 分钟的「无声连接」判死线，
+/// 又不至于把日志刷满。
+///
+/// 不做成设置项 —— 用户没有任何依据判断该填几秒，而这个值也没有副作用
+/// （只在上游沉默时往下游写一行 SSE 注释）。
+pub const HEARTBEAT_SECS: u64 = 15;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -127,63 +110,16 @@ pub struct Config {
     /// 默认 5678 时不序列化 —— 红线 #1 对默认值成立，老用户文件格式不变。
     #[serde(default = "default_port", skip_serializing_if = "is_default_port")]
     pub port: u16,
-    /// 2.1-A 新增（§3.3）：兼容模式 —— 未映射的槽位仍回落到第一个模型（v1 的静默行为）。
-    /// 默认关：未映射直接 400，用户才知道自己在用什么模型。
-    /// 值为 false 时不序列化 —— 老用户文件格式不变。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub compat_fallback: bool,
     /// 2.1-B 新增（§2.2）：上次「应用」时用的槽位池代号。空 = 2.1 之前应用过（或从没应用过），
     /// 前端据此把「升级导致的 dirty」和「用户改了配置」区分开，给出对应的提示语。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_applied_pool: String,
-    /// 2.1-B 新增（§五①）：人民币兑美元汇率。预设库里的费率是**人民币原价**
-    /// （便于对照各家官网价目表校验），写 `inferenceModelPricing` 时统一除以它换算成
-    /// USD —— 该键单位写死 USD/百万 token，而 `inferenceModelPricingMultiplier`
-    /// 取值域是 (0,1]，>1 会被拒，当不了汇率。
-    #[serde(default = "default_usd_rate", skip_serializing_if = "is_default_usd_rate")]
-    pub usd_rate: f64,
     /// 2.1-B 新增：启动时自动从 models.dev 同步费率（6 小时阈值）。默认开。
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub pricing_auto_sync: bool,
     /// 上次成功同步的时间（Unix 秒，字符串）。空 = 从没同步过。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pricing_synced_at: String,
-    /// 2.1-D 新增（§3.7）：用户自定义的组织级指令，原样写入 `organizationInstructions`，
-    /// ModelLink 不拼接任何自动生成文本。上限 3000 字符（app 硬限制）。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub org_instructions: String,
-    /// 2.1-D 新增（§3.7）：在指令前追加真实模型说明（槽位映射）。
-    ///
-    /// 默认**开**：§5.5.1 抓包推翻了原先的乐观结论 —— Chat 模式跑的是 Claude Code
-    /// 引擎，系统提示词第 [1] 块是第二人称角色断言（"You are a Claude agent…"），
-    /// 比 §1.2 实验里的第三人称能力描述强硬得多，实测 Kimi 在 Chat 里会自称
-    /// 「我是 Claude，由 Anthropic 开发」。
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub org_identity_note: bool,
-    /// 2.1 新增（§5.5.4）：给会话标题生成注入最省的思考设置。默认开。
-    ///
-    /// 桌面端每开一个新会话都会来一发标题生成：451 in / 110 out，其中 88 是思考 token，
-    /// 只为起个标题。关掉思考对标题质量没有可见影响。
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub optimize_title_gen: bool,
-    /// 2.1 新增（§5.5.4）：连接健康检查本地短路，不打上游。默认**关**。
-    ///
-    /// 只省 8 个 token，却会让健康检查在上游已经挂掉时依然显示正常 ——
-    /// 掩盖真实故障的代价远大于这点开销，所以默认不开，留给确实在意的用户。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub short_circuit_health_check: bool,
-    /// 2.1-E 新增（§3.9）：Claude Desktop 出网代理。只接受 http:// / https://，
-    /// 不接受内嵌账号密码；空 = 不设。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub egress_proxy_url: String,
-    /// 2.1-E 新增（§3.9）：PAC 自动配置地址。设了它就压过 `egress_proxy_url`。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub egress_proxy_pac_url: String,
-    /// 2.1-C 新增（§3.2）：流式响应的 SSE 心跳间隔（秒）。0 = 关闭。
-    /// 上游沉默超过这个时长就往下游写一行 `: ping`，配合
-    /// `inferenceStreamIdleTimeoutSec` 治长生成断流。
-    #[serde(default = "default_heartbeat_secs", skip_serializing_if = "is_default_heartbeat")]
-    pub heartbeat_secs: u64,
 }
 
 impl Default for Config {
@@ -193,18 +129,9 @@ impl Default for Config {
             last_applied_hash: String::new(),
             last_applied_at: String::new(),
             port: DEFAULT_PORT,
-            compat_fallback: false,
             last_applied_pool: String::new(),
-            usd_rate: DEFAULT_USD_RATE,
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
-            org_instructions: String::new(),
-            org_identity_note: true,
-            optimize_title_gen: true,
-            short_circuit_health_check: false,
-            egress_proxy_url: String::new(),
-            egress_proxy_pac_url: String::new(),
-            heartbeat_secs: DEFAULT_HEARTBEAT_SECS,
         }
     }
 }
@@ -290,8 +217,9 @@ impl ModelEntry {
     }
 }
 
-/// 单个模型的费率（§3.1）。四个字段全部可选 —— 只填知道的，没填的不写进网关配置。
-/// 单位：**每百万 token**，币种由 `currency` 决定（空 = 人民币，按 `usd_rate` 换算）。
+/// 单个模型的费率（§3.1）。单位固定 **USD / 百万 token** —— 与
+/// `inferenceModelPricing` 要求的单位一致，也与 models.dev 的 `cost` 一致，
+/// 全程不经过任何汇率换算。
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct ModelPricing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,30 +230,9 @@ pub struct ModelPricing {
     pub cache_read: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<f64>,
-    /// ""（默认）= 人民币，写入时按汇率换算；"USD" = 本来就按美元计价，原样写入。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub currency: String,
 }
 
 impl ModelPricing {
-    /// 换算成 USD/百万 token。`currency == "USD"` 时原样返回。
-    /// 汇率非正或 NaN 时退回默认值 —— 宁可价格略有偏差，也不能写出 inf / 负价。
-    pub fn in_usd(&self, rate: f64) -> ModelPricing {
-        if self.currency.eq_ignore_ascii_case("USD") {
-            return self.clone();
-        }
-        let rate = if rate.is_finite() && rate > 0.0 { rate } else { DEFAULT_USD_RATE };
-        // 4 位小数：每百万 token 精确到 0.0001 美元，够用且文件可读
-        let conv = |v: Option<f64>| v.map(|x| (x / rate * 10_000.0).round() / 10_000.0);
-        ModelPricing {
-            input: conv(self.input),
-            output: conv(self.output),
-            cache_read: conv(self.cache_read),
-            cache_write: conv(self.cache_write),
-            currency: self.currency.clone(),
-        }
-    }
-
     /// 一个字段都没填 = 等于没配（不写覆盖行）。
     pub fn is_empty(&self) -> bool {
         self.input.is_none()
@@ -498,7 +405,6 @@ pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
 /// 同类行为更糟 —— 实测 Kimi `/coding/` 端点对 `banana`、空字符串、`claude-opus-5`
 /// 一律 200 直接给默认模型。两层静默回落之下，用户完全不知道自己在用什么模型。
 ///
-/// 依赖旧行为的用户可打开 `compat_fallback`（默认关）。
 pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, ResolveError> {
     let (base, is_1m) = if model.ends_with("[1m]") {
         (&model[..model.len() - 4], true)
@@ -519,23 +425,6 @@ pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, Reso
                 target_url: e.url.clone(),
                 api_key: e.key.clone(),
                 thinking_effort: e.thinking_effort.clone(),
-            });
-        }
-    }
-
-    if config.compat_fallback {
-        if let Some(e) = flat.into_iter().next() {
-            let resolved = if is_1m && !e.to_1m.is_empty() {
-                format!("{}[1m]", e.name)
-            } else {
-                e.name
-            };
-            eprintln!("  fallback: {} -> {} (兼容模式)", model, resolved);
-            return Ok(ResolvedModel {
-                model: resolved,
-                target_url: e.url,
-                api_key: e.key,
-                thinking_effort: e.thinking_effort,
             });
         }
     }
@@ -736,46 +625,6 @@ mod tests {
         );
     }
 
-    // ---- 兼容模式（默认关）：还原 v1 的回落行为 ----
-
-    #[test]
-    fn compat_mode_restores_v1_fallback_to_first_entry() {
-        let mut cfg = sample_config();
-        cfg.compat_fallback = true;
-        let r = resolve_model("claude-9-nonexistent", &cfg).unwrap();
-        assert_eq!(r.model, "model-a1");
-        assert_eq!(r.target_url, "https://a.example.com");
-        assert_eq!(r.thinking_effort, "max");
-
-        let r = resolve_model("claude-9-nonexistent[1m]", &cfg).unwrap();
-        assert_eq!(r.model, "model-a1[1m]");
-    }
-
-    #[test]
-    fn compat_mode_still_errors_when_nothing_to_fall_back_to() {
-        let cfg = Config { compat_fallback: true, ..Default::default() };
-        assert_eq!(
-            resolve_model("claude-opus-5", &cfg),
-            Err(ResolveError::UnmappedSlot("claude-opus-5".into()))
-        );
-    }
-
-    #[test]
-    fn compat_fallback_defaults_off_and_round_trips() {
-        // 老文件没有这个键 → 默认关
-        let cfg: Config = serde_json::from_str(r#"{"providers":[]}"#).unwrap();
-        assert!(!cfg.compat_fallback);
-        // 关着时不序列化 —— 老用户文件格式不变
-        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("compat_fallback"));
-        let mut cfg = sample_config();
-        cfg.compat_fallback = true;
-        let out = serde_json::to_string(&cfg).unwrap();
-        assert!(out.contains("\"compat_fallback\":true"));
-        assert!(serde_json::from_str::<Config>(&out).unwrap().compat_fallback);
-        // 只影响代理路由，不改 Claude Desktop 的键 → 不参与 dirty 判定
-        assert_eq!(canonical_hash(&cfg), canonical_hash(&sample_config()));
-    }
-
     // ---- serde 格式兼容（红线 #2） ----
 
     #[test]
@@ -859,11 +708,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.providers[0].models[0].pricing, None);
-        assert_eq!(cfg.usd_rate, 7.2);
         // 没填费率 / 用默认汇率时，写出去的文件与 2.0 一模一样
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(!out.contains("pricing"), "{out}");
-        assert!(!out.contains("usd_rate"), "{out}");
     }
 
     #[test]
@@ -874,48 +721,8 @@ mod tests {
         assert_eq!(pr.output, Some(16.0));
         assert_eq!(pr.cache_read, None);
         assert_eq!(pr.cache_write, None);
-        assert_eq!(pr.currency, "");
         // 四个字段都可选 —— 没填的不写出去
         assert_eq!(serde_json::to_string(&pr).unwrap(), json);
-    }
-
-    #[test]
-    fn cny_pricing_converts_by_the_user_supplied_rate() {
-        // 预设库存人民币原价（便于对照各家官网价目表），写入时统一换算
-        let cny = ModelPricing {
-            input: Some(4.0),
-            output: Some(16.0),
-            cache_read: Some(0.8),
-            cache_write: None,
-            currency: String::new(),
-        };
-        let usd = cny.in_usd(7.2);
-        assert_eq!(usd.input, Some(0.5556));
-        assert_eq!(usd.output, Some(2.2222));
-        assert_eq!(usd.cache_read, Some(0.1111));
-        assert_eq!(usd.cache_write, None);
-    }
-
-    #[test]
-    fn usd_priced_providers_skip_conversion() {
-        // §五①：少数海外中转本来就按美元计价，标了 USD 就原样写入
-        let usd = ModelPricing {
-            input: Some(0.58),
-            output: Some(2.32),
-            cache_read: None,
-            cache_write: None,
-            currency: "USD".into(),
-        };
-        assert_eq!(usd.in_usd(7.2), usd);
-    }
-
-    #[test]
-    fn nonsense_rate_never_produces_infinite_prices() {
-        let cny = ModelPricing { input: Some(4.0), ..Default::default() };
-        // 0 / 负数 / NaN 汇率一律退回默认 7.2，绝不写出 inf 或负价
-        for bad in [0.0, -1.0, f64::NAN] {
-            assert_eq!(cny.in_usd(bad).input, Some(0.5556), "rate={bad}");
-        }
     }
 
     #[test]
@@ -926,7 +733,6 @@ mod tests {
         let mut b = sample_config();
         b.providers[0].models[0].pricing_synced = Some(ModelPricing {
             input: Some(0.95),
-            currency: "USD".into(),
             ..Default::default()
         });
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
@@ -942,7 +748,6 @@ mod tests {
         let synced = ModelPricing {
             input: Some(0.95),
             output: Some(4.0),
-            currency: "USD".into(),
             ..Default::default()
         };
         let m = ModelEntry {
@@ -968,7 +773,7 @@ mod tests {
 
     #[test]
     fn flatten_carries_effective_pricing_to_the_gateway() {
-        let synced = ModelPricing { input: Some(0.95), currency: "USD".into(), ..Default::default() };
+        let synced = ModelPricing { input: Some(0.95), ..Default::default() };
         let cfg = Config {
             providers: vec![provider(
                 "https://a.example.com",

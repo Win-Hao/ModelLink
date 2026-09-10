@@ -78,8 +78,6 @@ pub fn parse_catalog(body: &[u8]) -> Result<Catalog, String> {
                 output: num("output"),
                 cache_read: num("cache_read"),
                 cache_write: num("cache_write"),
-                // models.dev 一律 USD —— 标上就不会再被汇率换算一遍
-                currency: "USD".to_string(),
             };
             let context = model
                 .get("limit")
@@ -119,7 +117,6 @@ pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelInfo> {
                     output: Some(0.0),
                     cache_read: Some(0.0),
                     cache_write: Some(0.0),
-                    currency: "USD".to_string(),
                 },
                 // 价格是服务商的属性（订阅制 = 0），上下文窗口是**模型自身**的属性 ——
                 // 这家没列这个模型，去别家借它的上下文事实是成立的（借价格则不成立）。
@@ -309,9 +306,7 @@ mod tests {
     fn parsed_prices_are_marked_usd_so_the_rate_never_touches_them() {
         // models.dev 一律 USD/百万 token，再除一次汇率就成了三分之一价
         let c = catalog();
-        let p = &c["moonshotai-cn"]["kimi-k2.6"].pricing;
-        assert_eq!(p.currency, "USD");
-        assert_eq!(p.in_usd(7.2), *p);
+        assert_eq!(c["moonshotai-cn"]["kimi-k2.6"].pricing.input, Some(0.95));
     }
 
     #[test]
@@ -442,7 +437,6 @@ mod tests {
         let p = lookup(&c, "https://api.kimi.com/coding/", "Kimi-k2.6").unwrap().pricing;
         assert_eq!(p.input, Some(0.0));
         assert_eq!(p.output, Some(0.0));
-        assert_eq!(p.currency, "USD");
 
         // 按量付费的服务商不适用：查不到就是查不到，绝不当成 0
         assert_eq!(lookup(&c, "https://api.moonshot.cn/anthropic", "查无此模型"), None);
@@ -459,7 +453,6 @@ mod tests {
             ModelInfo {
                 pricing: ModelPricing {
                     input: Some(99.0),
-                    currency: "USD".into(),
                     ..Default::default()
                 },
                 context: None,
@@ -514,7 +507,7 @@ mod tests {
 
     #[test]
     fn synced_pricing_survives_a_stale_draft_being_saved() {
-        let synced = ModelPricing { input: Some(0.95), currency: "USD".into(), ..Default::default() };
+        let synced = ModelPricing { input: Some(0.95), ..Default::default() };
         let mk = |sync: Option<ModelPricing>| Config {
             providers: vec![Provider {
                 target_url: "https://api.moonshot.cn/anthropic".into(),
@@ -537,7 +530,7 @@ mod tests {
 
     #[test]
     fn preserving_matches_by_name_not_index() {
-        let synced = ModelPricing { input: Some(0.95), currency: "USD".into(), ..Default::default() };
+        let synced = ModelPricing { input: Some(0.95), ..Default::default() };
         let provider = |models: Vec<ModelEntry>| Config {
             providers: vec![Provider {
                 target_url: "https://api.moonshot.cn/anthropic".into(),
@@ -586,7 +579,7 @@ mod tests {
     #[test]
     fn an_empty_catalog_never_wipes_existing_prices() {
         // 万一 models.dev 某次返回了个空表，不能把用户已有的费率清掉
-        let synced = ModelPricing { input: Some(0.95), currency: "USD".into(), ..Default::default() };
+        let synced = ModelPricing { input: Some(0.95), ..Default::default() };
         let mut cfg = Config {
             providers: vec![Provider {
                 target_url: "https://api.moonshot.cn/anthropic".into(),

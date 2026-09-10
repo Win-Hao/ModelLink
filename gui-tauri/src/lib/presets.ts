@@ -36,15 +36,6 @@ export const KEY_FEATURE_NAMES: Record<string, string> = {
   egressProxyPacUrl: "PAC 代理",
 };
 
-/** organizationInstructions 的硬上限（app.asar：D().trim().min(1).max(3e3)）。 */
-export const ORG_INSTRUCTIONS_MAX = 3000;
-
-/** 镜像后端 config.rs::DEFAULT_HEARTBEAT_SECS（§3.2）。 */
-export const DEFAULT_HEARTBEAT_SECS = 15;
-
-/** 镜像后端 config.rs::DEFAULT_USD_RATE（§五①）。 */
-export const DEFAULT_USD_RATE = 7.2;
-
 /** 镜像后端 config.rs::SLOT_POOL_VERSION —— 换槽位池时两边必须同时改。 */
 export const SLOT_POOL_VERSION = "2.1";
 

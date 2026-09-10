@@ -73,8 +73,6 @@ function PricingPanel({
   synced?: ModelPricing;
   onChange: (fn: (p: ModelPricing) => void) => void;
 }) {
-  const usd = pricing?.currency === "USD";
-  const unit = usd ? "$" : "¥";
   const manual = PRICE_FIELDS.some((f) => pricing?.[f.key] != null);
   // 手填了但缺输入/输出价 —— 这一行不会被写入（Claude schema 四字段必填）
   const partial = manual && (pricing?.input == null || pricing?.output == null);
@@ -84,17 +82,9 @@ function PricingPanel({
     <div className="mb-1 ml-1 mr-1 rounded-[9px] border border-dashed bg-background px-3 py-2.5">
       <div className="flex items-center justify-between">
         <span className="text-[10.5px] text-muted-foreground">
-          费率 · {unit} / 百万 token · 输入与输出必填
+          {/* 单位固定美元：inferenceModelPricing 与 models.dev 都是这个单位，全程不换算 */}
+          费率 · 美元 / 百万 token · 输入与输出必填
         </span>
-        {/* §五①：预设库存人民币原价，写入时按设置页的汇率换算；
-            少数本来就按美元计价的中转标 USD 跳过换算 */}
-        <button
-          type="button"
-          onClick={() => onChange((p) => (p.currency = usd ? "" : "USD"))}
-          className="mono rounded-[5px] border px-1.5 py-px text-[10px] text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {usd ? "USD（不换算）" : "CNY（按汇率换算）"}
-        </button>
       </div>
       <div className="mt-1.5 grid grid-cols-4 gap-1.5">
         {PRICE_FIELDS.map((f) => (

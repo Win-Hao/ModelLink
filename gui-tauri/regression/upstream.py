@@ -26,9 +26,9 @@ REJECT_EFFORT = json.dumps({
 OK = json.dumps({"id": "msg_test", "type": "message",
                  "content": [{"type": "text", "text": "ok"}]}).encode()
 
-# 上游「思考中」的沉默时长。取 7s 而非设计文档验收里的 60s：
-# 回归配置把心跳间隔调到 2s，7s 沉默即可观察到 3 次心跳，机制完全一样但跑得快。
-SILENCE_SECS = 7
+# 上游「思考中」的沉默时长。心跳间隔固定 15s（不再是设置项），
+# 所以这里必须超过 15s 才能观察到心跳；取 20s，机制与文档验收里的 60s 一致。
+SILENCE_SECS = 20
 
 REJECT_BUDGET = json.dumps({
     "type": "error",

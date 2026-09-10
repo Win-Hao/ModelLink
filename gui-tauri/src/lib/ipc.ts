@@ -12,8 +12,6 @@ export type ModelPricing = {
   output?: number;
   cache_read?: number;
   cache_write?: number;
-  /** ""（默认）= 人民币，写入时按汇率换算；"USD" = 原样写入。 */
-  currency?: string;
 };
 
 export type ModelEntry = {
@@ -50,30 +48,12 @@ export type Config = {
   last_applied_at?: string;
   /** 代理端口（后端专管，set_port 热切换；缺省 5678）。 */
   port?: number;
-  /** 兼容模式：未映射的槽位回落到第一个模型（v1 静默行为），默认关。 */
-  compat_fallback?: boolean;
   /** 上次「应用」时用的槽位池代号；与当前不符 = 升级后还没重新应用。 */
   last_applied_pool?: string;
-  /** 人民币兑美元汇率（§五①，默认 7.2）；费率写入网关时按它换算。 */
-  usd_rate?: number;
   /** 启动时自动从 models.dev 同步费率（6 小时阈值），默认开。 */
   pricing_auto_sync?: boolean;
   /** 上次成功同步时间（Unix 秒字符串）。 */
   pricing_synced_at?: string;
-  /** 流式响应的 SSE 心跳间隔（秒），0 = 关闭；默认 15。 */
-  heartbeat_secs?: number;
-  /** 组织级自定义指令，原样写入 organizationInstructions（上限 3000 字符）。 */
-  org_instructions?: string;
-  /** 在指令前追加槽位映射说明（默认开）。 */
-  org_identity_note?: boolean;
-  /** Claude Desktop 出网代理（http/https，不含账号密码）。 */
-  egress_proxy_url?: string;
-  /** PAC 自动配置地址；设了它就压过 egress_proxy_url。 */
-  egress_proxy_pac_url?: string;
-  /** 给会话标题生成注入最省的思考设置（默认开）。 */
-  optimize_title_gen?: boolean;
-  /** 连接健康检查本地应答，不打上游（默认关）。 */
-  short_circuit_health_check?: boolean;
 };
 
 /** 检测到的 Claude Desktop 版本 + 因版本过低不可用的键（§3.8）。 */

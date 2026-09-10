@@ -35,7 +35,6 @@ mk_home() {
     {"target_url": "http://127.0.0.1:9998", "api_key": "test-key-e", "models": [{"name": "real-e", "to_1m": ""}], "thinking_effort": ""},
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-5", "models": [{"name": "over-0", "to_1m": ""}, {"name": "over-1", "to_1m": ""}, {"name": "over-2", "to_1m": ""}, {"name": "over-3", "to_1m": ""}, {"name": "over-4", "to_1m": ""}, {"name": "over-5", "to_1m": ""}, {"name": "over-6", "to_1m": ""}, {"name": "over-7", "to_1m": ""}, {"name": "over-8", "to_1m": ""}, {"name": "over-9", "to_1m": ""}, {"name": "over-10", "to_1m": ""}, {"name": "over-11", "to_1m": ""}, {"name": "over-12", "to_1m": ""}, {"name": "over-13", "to_1m": ""}, {"name": "over-14", "to_1m": ""}, {"name": "over-15", "to_1m": ""}, {"name": "over-16", "to_1m": ""}, {"name": "over-17", "to_1m": ""}], "thinking_effort": ""}
   ],
-  "heartbeat_secs": 2,
   "pricing_auto_sync": false
 }
 EOF
@@ -315,7 +314,7 @@ if [ "$(cat "$EQ/out-old/rectify.status")" = "400" ]; then
 else
   echo "✗ 对照失败：v1 的 rectify.status = $(cat "$EQ/out-old/rectify.status")"; fail=1
 fi
-echo "=== §3.2 SSE 心跳（上游沉默 7s，心跳间隔 2s） ==="
+echo "=== §3.2 SSE 心跳（上游沉默 20s，心跳固定 15s） ==="
 if python3 - "$EQ" <<'PY'
 import sys, pathlib
 eq = pathlib.Path(sys.argv[1])
@@ -324,8 +323,8 @@ fails = 0
 new_body = (eq / "out-new" / "heartbeat.body").read_text()
 old_body = (eq / "out-old" / "heartbeat.body").read_text()
 pings = new_body.count(": ping")
-# 7s 沉默 / 2s 间隔 → 至少 2 次（留一次余量给调度抖动）
-if pings >= 2:
+# 20s 沉默 / 15s 间隔 → 至少 1 次
+if pings >= 1:
     print(f"✓ 流式沉默期间下游收到 {pings} 次 `: ping`")
 else:
     print(f"✗ 心跳次数不足: {pings} 次，body={new_body!r}"); fails += 1

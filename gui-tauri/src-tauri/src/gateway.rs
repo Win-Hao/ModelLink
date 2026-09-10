@@ -96,57 +96,6 @@ fn write_gateway_keys(existing: &mut serde_json::Value, port: u16, gate: &Versio
     }
 }
 
-/// §3.9 网络代理透传。约束照 app 内的说明逐条对齐：
-/// - 只接受 `http://` / `https://`，SOCKS 被拒；
-/// - 不接受内嵌账号密码（`user:pass@`）；
-/// - `localhost` / `127.0.0.1` / `[::1]` / `*.local` 由 app 自动 bypass，
-///   所以 ModelLink 自己的 127.0.0.1 网关不受影响；
-/// - 代理不通**直接失败，不回落直连**；
-/// - 只在启动时读一次，改了要重启 Claude。
-///
-/// PAC 一旦设了就压过普通代理（app 原文："the PAC file wins and this key is ignored"），
-/// 所以两个都填时只写 PAC，免得用户以为普通代理还在生效。
-pub fn egress_proxy_url_valid(url: &str) -> bool {
-    let u = url.trim();
-    if u.is_empty() {
-        return false;
-    }
-    if !(u.starts_with("http://") || u.starts_with("https://")) {
-        return false;
-    }
-    // 内嵌账号密码：scheme 之后、第一个 / 之前出现 @
-    let rest = u.split_once("://").map(|(_, r)| r).unwrap_or("");
-    let authority = rest.split('/').next().unwrap_or("");
-    !authority.contains('@')
-}
-
-fn write_egress_proxy(existing: &mut serde_json::Value, config: &Config, gate: &VersionGate) {
-    let remove = |e: &mut serde_json::Value, k: &str| {
-        if let Some(o) = e.as_object_mut() {
-            o.remove(k);
-        }
-    };
-    if !gate.allows("egressProxyUrl") {
-        remove(existing, "egressProxyUrl");
-        remove(existing, "egressProxyPacUrl");
-        return;
-    }
-    let pac = config.egress_proxy_pac_url.trim();
-    let plain = config.egress_proxy_url.trim();
-
-    if egress_proxy_url_valid(pac) {
-        existing["egressProxyPacUrl"] = serde_json::json!(pac);
-        // PAC 生效时普通代理会被忽略，别留一个看着像在用的键
-        remove(existing, "egressProxyUrl");
-    } else if egress_proxy_url_valid(plain) {
-        existing["egressProxyUrl"] = serde_json::json!(plain);
-        remove(existing, "egressProxyPacUrl");
-    } else {
-        remove(existing, "egressProxyUrl");
-        remove(existing, "egressProxyPacUrl");
-    }
-}
-
 pub fn ensure_claude_desktop_gateway(port: u16) {
     let claude_dir = match claude_3p_dir() {
         Some(d) => d,
@@ -336,36 +285,27 @@ fn inference_models_entries(flat: &[crate::config::FlatEntry]) -> Vec<serde_json
 /// zod 的 `.max` 按 UTF-16 码元计，故这里也按 UTF-16 截断。
 const ORG_INSTRUCTIONS_MAX: usize = 3000;
 
-/// §3.7 写 `organizationInstructions`。
+/// §3.7 写 `organizationInstructions`：把槽位映射摊给模型。
 ///
 /// 内容追加到 Chat / Cowork / Code 的系统提示词（含它们派生的子 agent），
 /// app 会告诉模型「这来自管理员，优先于用户个人偏好」—— 是引导不是强制约束。
 ///
-/// ⚠️ schema 是 `.trim().min(1)`：清空后必须**删键**，写空串会被拒，
+/// **不做成设置项**：Chat 模式跑的是 Claude Code 引擎，系统提示词第 [1] 块是
+/// 第二人称角色断言（"You are a Claude agent…"），实测会让部分国产模型自称
+/// Claude；配上这段映射后 Kimi 能正确答出「我是 Kimi-k2.6，claude-opus-5 只是
+/// 网关路由槽位名」。用户没有理由关掉它，那就不该问。
+///
+/// ⚠️ schema 是 `.trim().min(1)`：没有内容时必须**删键**，写空串会被拒，
 /// 而一条不合法就可能让整个配置文件失效。
-fn write_org_instructions(
-    existing: &mut serde_json::Value,
-    user_text: &str,
-    identity_note: bool,
-    slot_map: &[(String, String)],
-) {
-    let mut parts: Vec<String> = Vec::new();
-    if identity_note && !slot_map.is_empty() {
-        parts.push(identity_note_text(slot_map));
-    }
-    let user_text = user_text.trim();
-    if !user_text.is_empty() {
-        parts.push(user_text.to_string());
-    }
-
-    let combined = parts.join("\n\n");
-    if combined.is_empty() {
+fn write_org_instructions(existing: &mut serde_json::Value, slot_map: &[(String, String)]) {
+    if slot_map.is_empty() {
         if let Some(o) = existing.as_object_mut() {
             o.remove("organizationInstructions");
         }
         return;
     }
-    existing["organizationInstructions"] = serde_json::json!(clamp_utf16(&combined, ORG_INSTRUCTIONS_MAX));
+    let text = clamp_utf16(&identity_note_text(slot_map), ORG_INSTRUCTIONS_MAX);
+    existing["organizationInstructions"] = serde_json::json!(text);
 }
 
 /// §3.7 的兜底文案：把槽位映射摊给模型。
@@ -409,17 +349,14 @@ const PRICE_MAX: f64 = 10_000.0;
 /// 「全部可选」与 app.asar 里的 schema 不符，以 schema 为准）。因此：
 /// - 缓存价没填按 0 计 —— 多数国产服务商不单独收缓存写入费，models.dev 也是不收才不写；
 /// - 输入 / 输出价没填就整行不写 —— 那两个数编不得，宁可这个模型不显示费用。
-fn inference_model_pricing_entries(
-    flat: &[crate::config::FlatEntry],
-    usd_rate: f64,
-) -> Vec<serde_json::Value> {
+fn inference_model_pricing_entries(flat: &[crate::config::FlatEntry]) -> Vec<serde_json::Value> {
     let clamp = |v: f64| v.clamp(0.0, PRICE_MAX);
     let mut out = Vec::new();
     for e in flat {
         let Some(p) = e.pricing.as_ref().filter(|p| !p.is_empty()) else {
             continue;
         };
-        let p = p.in_usd(usd_rate);
+        let p = p.clone();
         let (Some(input), Some(output)) = (p.input, p.output) else {
             eprintln!("[pricing] {} 缺输入/输出价，跳过该行", e.slot);
             continue;
@@ -440,12 +377,8 @@ fn inference_model_pricing_entries(
 /// 的形态 —— 没有覆盖行时引擎会按 Anthropic 官方价估算，那是假账单。宁可不显示费用。
 ///
 /// （`inferenceModelPricing*` 1.37937.0 起支持；按版本门槛跳过写入属于 §3.8，排在 E 批。）
-fn write_pricing_keys(
-    existing: &mut serde_json::Value,
-    flat: &[crate::config::FlatEntry],
-    usd_rate: f64,
-) {
-    let rows = inference_model_pricing_entries(flat, usd_rate);
+fn write_pricing_keys(existing: &mut serde_json::Value, flat: &[crate::config::FlatEntry]) {
+    let rows = inference_model_pricing_entries(flat);
     existing["inferenceModelPricingEnabled"] = serde_json::json!(!rows.is_empty());
     existing["inferenceModelPricing"] = serde_json::json!(rows);
 }
@@ -525,18 +458,12 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
     write_gateway_keys(&mut existing, config.port, &gate);
     existing["inferenceModels"] = serde_json::json!(models);
     if gate.allows("inferenceModelPricing") {
-        write_pricing_keys(&mut existing, &flat, config.usd_rate);
+        write_pricing_keys(&mut existing, &flat);
     }
-    write_egress_proxy(&mut existing, config, &gate);
     let slot_map: Vec<(String, String)> =
         flat.iter().map(|e| (e.slot.clone(), e.name.clone())).collect();
     if gate.allows("organizationInstructions") {
-        write_org_instructions(
-            &mut existing,
-            &config.org_instructions,
-            config.org_identity_note,
-            &slot_map,
-        );
+        write_org_instructions(&mut existing, &slot_map);
     }
 
     let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
@@ -759,58 +686,6 @@ mod tests {
         assert!(existing.get("chatTabEnabled").is_none());
     }
 
-    #[test]
-    fn egress_proxy_accepts_only_what_the_app_accepts() {
-        assert!(egress_proxy_url_valid("http://proxy.corp:8080"));
-        assert!(egress_proxy_url_valid("https://proxy.corp:8080/path"));
-        // SOCKS 被拒
-        assert!(!egress_proxy_url_valid("socks5://proxy.corp:1080"));
-        // 内嵌账号密码被拒
-        assert!(!egress_proxy_url_valid("http://user:pass@proxy.corp:8080"));
-        // 路径里的 @ 不算
-        assert!(egress_proxy_url_valid("http://proxy.corp/a@b"));
-        assert!(!egress_proxy_url_valid(""));
-        assert!(!egress_proxy_url_valid("proxy.corp:8080"));
-    }
-
-    #[test]
-    fn pac_url_wins_over_the_plain_proxy() {
-        // app 原文："When egressProxyPacUrl is also set, the PAC file wins and
-        // this key is ignored" —— 别留一个看着像在用的键
-        let mut existing = serde_json::json!({});
-        let cfg = Config {
-            egress_proxy_url: "http://proxy.corp:8080".into(),
-            egress_proxy_pac_url: "https://corp/proxy.pac".into(),
-            ..Default::default()
-        };
-        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(None));
-        assert_eq!(existing["egressProxyPacUrl"], "https://corp/proxy.pac");
-        assert!(existing.get("egressProxyUrl").is_none());
-    }
-
-    #[test]
-    fn invalid_or_absent_proxy_clears_both_keys() {
-        let mut existing = serde_json::json!({
-            "egressProxyUrl": "http://old:8080",
-            "egressProxyPacUrl": "https://old/x.pac"
-        });
-        let cfg = Config {
-            egress_proxy_url: "socks5://nope:1080".into(),
-            ..Default::default()
-        };
-        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(None));
-        assert!(existing.get("egressProxyUrl").is_none());
-        assert!(existing.get("egressProxyPacUrl").is_none());
-    }
-
-    #[test]
-    fn old_desktop_never_gets_proxy_keys() {
-        let mut existing = serde_json::json!({});
-        let cfg = Config { egress_proxy_url: "http://proxy.corp:8080".into(), ..Default::default() };
-        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(Some("1.40000.0")));
-        assert!(existing.get("egressProxyUrl").is_none());
-    }
-
     // ---- §3.5 模型条目补三个字段 ----
 
     #[test]
@@ -948,34 +823,17 @@ mod tests {
     // ---- §3.7 organizationInstructions ----
 
     #[test]
-    fn org_instructions_key_is_removed_when_blank() {
-        // app.asar schema：D().trim().min(1).max(3e3) —— 写空串会被拒，
-        // 一条不合法就可能让整个配置文件失效，所以必须删键
-        let mut existing = serde_json::json!({"organizationInstructions": "旧内容"});
-        write_org_instructions(&mut existing, "   \n  ", false, &[]);
-        assert!(existing.get("organizationInstructions").is_none());
-    }
-
-    #[test]
-    fn org_instructions_are_written_verbatim() {
-        let mut existing = serde_json::json!({});
-        write_org_instructions(&mut existing, "统一用简体中文回答。", false, &[]);
-        assert_eq!(existing["organizationInstructions"], "统一用简体中文回答。");
-    }
-
-    #[test]
     fn identity_note_prepends_the_slot_mapping() {
         let mut existing = serde_json::json!({});
         let map = [
             ("claude-opus-5".to_string(), "Kimi-k2.6".to_string()),
             ("claude-sonnet-5".to_string(), "glm-5.1".to_string()),
         ];
-        write_org_instructions(&mut existing, "统一用简体中文回答。", true, &map);
+        write_org_instructions(&mut existing, &map);
         let s = existing["organizationInstructions"].as_str().unwrap();
         assert!(s.contains("claude-opus-5 = Kimi-k2.6"), "{s}");
         assert!(s.contains("claude-sonnet-5 = glm-5.1"), "{s}");
         assert!(s.contains("路由槽位"), "{s}");
-        assert!(s.ends_with("统一用简体中文回答。"), "用户文本必须原样附在后面: {s}");
     }
 
     #[test]
@@ -985,25 +843,6 @@ mod tests {
         for line in identity_note_text(&map).lines() {
             assert_eq!(line, line.trim(), "行首/行尾有多余空白: {line:?}");
         }
-    }
-
-    #[test]
-    fn identity_note_alone_is_enough_to_write_the_key() {
-        // 用户没写自定义指令，但开了兜底开关 → 仍然要写
-        let mut existing = serde_json::json!({});
-        let map = [("claude-opus-5".to_string(), "Kimi-k2.6".to_string())];
-        write_org_instructions(&mut existing, "", true, &map);
-        assert!(existing["organizationInstructions"].as_str().unwrap().contains("Kimi-k2.6"));
-    }
-
-    #[test]
-    fn org_instructions_are_clamped_to_the_schema_limit() {
-        // 超 3000 会被 schema 拒 → 整个配置失效。按 UTF-16 计数（zod 的 .max 就是这么算的）
-        let mut existing = serde_json::json!({});
-        let long = "中".repeat(4000);
-        write_org_instructions(&mut existing, &long, false, &[]);
-        let s = existing["organizationInstructions"].as_str().unwrap();
-        assert!(s.encode_utf16().count() <= 3000, "实际 {}", s.encode_utf16().count());
     }
 
     // ---- §3.1 费率表 ----
@@ -1034,16 +873,16 @@ mod tests {
     }
 
     #[test]
-    fn pricing_entries_are_keyed_by_slot_and_converted_to_usd() {
+    fn pricing_entries_are_keyed_by_slot_and_written_verbatim() {
         let cfg = cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]);
-        let entries = inference_model_pricing_entries(&flatten_config(&cfg), cfg.usd_rate);
+        let entries = inference_model_pricing_entries(&flatten_config(&cfg));
         assert_eq!(
             entries,
             vec![serde_json::json!({
                 // name = 槽位 ID，不是上游真名 —— 引擎按这个匹配用量
                 "name": "claude-opus-5",
-                "inputPerMtok": 0.5556,
-                "outputPerMtok": 2.2222,
+                "inputPerMtok": 4.0,
+                "outputPerMtok": 16.0,
                 "cacheReadPerMtok": 0.0,
                 "cacheWritePerMtok": 0.0,
             })]
@@ -1056,7 +895,7 @@ mod tests {
         // ——「四个字段全部可选」是设计文档写错了。缺字段的行会被 schema 拒掉，
         // 而一行不合法很可能让整张费率表（甚至整个配置文件）失效。
         let cfg = cfg_with(vec![priced("m", 4.0, 16.0)]);
-        let rows = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        let rows = inference_model_pricing_entries(&flatten_config(&cfg));
         let row = rows[0].as_object().unwrap();
         for k in [
             "name",
@@ -1087,7 +926,7 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        assert!(inference_model_pricing_entries(&flatten_config(&cfg), 7.2).is_empty());
+        assert!(inference_model_pricing_entries(&flatten_config(&cfg)).is_empty());
     }
 
     #[test]
@@ -1099,12 +938,11 @@ mod tests {
                 input: Some(999_999.0),
                 output: Some(-5.0),
                 cache_read: Some(0.0),
-                cache_write: Some(0.0),
-                currency: "USD".into(),
+                cache_write: Some(0.0)
             }),
             ..Default::default()
         }]);
-        let rows = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        let rows = inference_model_pricing_entries(&flatten_config(&cfg));
         assert_eq!(rows[0]["inputPerMtok"], 10000.0);
         assert_eq!(rows[0]["outputPerMtok"], 0.0);
     }
@@ -1131,15 +969,15 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        let entries = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        let entries = inference_model_pricing_entries(&flatten_config(&cfg));
         // 只有 full 那条成行；它占的是第 2 个槽位（没定价的模型照样占槽位）
         assert_eq!(
             entries,
             vec![serde_json::json!({
                 "name": "claude-sonnet-5",
-                "inputPerMtok": 0.5556,
-                "outputPerMtok": 2.2222,
-                "cacheReadPerMtok": 0.1111,
+                "inputPerMtok": 4.0,
+                "outputPerMtok": 16.0,
+                "cacheReadPerMtok": 0.8,
                 "cacheWritePerMtok": 0.0,
             })]
         );
@@ -1151,12 +989,12 @@ mod tests {
         // 那就是假账单。宁可不显示费用。
         let mut existing = serde_json::json!({});
         let cfg = cfg_with(vec![ModelEntry { name: "m".into(), ..Default::default() }]);
-        write_pricing_keys(&mut existing, &flatten_config(&cfg), cfg.usd_rate);
+        write_pricing_keys(&mut existing, &flatten_config(&cfg));
         assert_eq!(existing["inferenceModelPricingEnabled"], false);
         assert_eq!(existing["inferenceModelPricing"], serde_json::json!([]));
 
         let cfg = cfg_with(vec![priced("m", 4.0, 16.0)]);
-        write_pricing_keys(&mut existing, &flatten_config(&cfg), cfg.usd_rate);
+        write_pricing_keys(&mut existing, &flatten_config(&cfg));
         assert_eq!(existing["inferenceModelPricingEnabled"], true);
         assert_eq!(existing["inferenceModelPricing"].as_array().unwrap().len(), 1);
     }
@@ -1181,8 +1019,6 @@ mod tests {
             ModelEntry { name: "no-price".into(), ..Default::default() },
         ]);
         cfg.providers[0].target_url = "https://api.kimi.com/coding/".into();
-        cfg.org_instructions = "统一用简体中文回答。".into();
-        cfg.org_identity_note = true;
         apply_to_claude_desktop(&cfg).unwrap();
 
         let written: serde_json::Value = serde_json::from_str(
@@ -1209,7 +1045,7 @@ mod tests {
             let v = rows[0][k].as_f64().unwrap_or_else(|| panic!("{k} 缺失或不是数字"));
             assert!((0.0..=PRICE_MAX).contains(&v), "{k}={v} 越界");
         }
-        assert_eq!(rows[0]["inputPerMtok"], 0.5556);
+        assert_eq!(rows[0]["inputPerMtok"], 4.0);
 
         // §3.5 模型条目进阶字段：设了的写、没设的不写
         assert_eq!(models[0]["prefer1m"], true);
@@ -1221,7 +1057,6 @@ mod tests {
         // §3.7 组织级指令：兜底说明在前、用户文本原样在后，且不超 3000
         let org = written["organizationInstructions"].as_str().unwrap();
         assert!(org.contains("claude-opus-5 = Kimi-k2.6"), "{org}");
-        assert!(org.ends_with("统一用简体中文回答。"), "{org}");
         assert!(org.encode_utf16().count() <= ORG_INSTRUCTIONS_MAX);
 
         // §3.4 两个键 + 用户其它字段不受影响

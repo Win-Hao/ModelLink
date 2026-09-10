@@ -27,7 +27,9 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::TcpListener;
 
-use crate::config::{flatten_config, resolve_model, Config, ResolveError, ResolvedModel};
+use crate::config::{
+    flatten_config, resolve_model, Config, ResolveError, ResolvedModel, HEARTBEAT_SECS,
+};
 
 pub const MAX_LOGS: usize = 100;
 
@@ -304,44 +306,6 @@ pub(crate) fn optimize_title_generation(data: &mut serde_json::Value) -> bool {
     true
 }
 
-/// 这是不是「连接健康检查」（§5.5.4）：`max_tokens=1`、正文一个点、无 system、无 tools。
-///
-/// 判定刻意从严 —— 宁可漏认（多花 8 个 token）也不能误认，
-/// 把用户真正的请求本地短路掉才是灾难。
-pub(crate) fn is_health_check(data: &serde_json::Value) -> bool {
-    // 本地应答是一个 JSON 对象；请求方要 SSE 流时直接给 JSON 会把客户端搞崩，
-    // 与其伪造一串 SSE 事件，不如老老实实转给上游（只是 8 个 token）。
-    if wants_stream(data) {
-        return false;
-    }
-    if data.get("max_tokens").and_then(|v| v.as_u64()) != Some(1) {
-        return false;
-    }
-    if data.get("system").is_some() || data.get("tools").is_some() {
-        return false;
-    }
-    let Some(msgs) = data.get("messages").and_then(|m| m.as_array()) else {
-        return false;
-    };
-    msgs.len() == 1 && first_message_text(data).map(|t| t.trim() == ".").unwrap_or(false)
-}
-
-/// 本地短路健康检查用的最小合法 Anthropic 响应。
-///
-/// usage 全 0 —— 这一发没打上游，不能记进任何账。
-pub(crate) fn health_check_reply(model: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": "msg_modellink_healthcheck",
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": [{"type": "text", "text": "."}],
-        "stop_reason": "end_turn",
-        "stop_sequence": serde_json::Value::Null,
-        "usage": {"input_tokens": 0, "output_tokens": 0}
-    })
-}
-
 /// 请求发出前的思考参数处理：标题生成优化（§5.5.4）+ thinking 三态注入（§3.10）。
 /// 返回（写进请求日志的档位标签，是否做了标题优化）。
 ///
@@ -352,10 +316,8 @@ pub(crate) fn health_check_reply(model: &str) -> serde_json::Value {
 pub(crate) fn prepare_thinking(
     data: &mut serde_json::Value,
     provider_effort: &str,
-    optimize_title: bool,
 ) -> (String, bool) {
-    let optimized =
-        optimize_title && is_title_generation(data) && optimize_title_generation(data);
+    let optimized = is_title_generation(data) && optimize_title_generation(data);
     let tag = inject_thinking(data, provider_effort);
     (tag, optimized)
 }
@@ -744,26 +706,9 @@ async fn proxy_fallback(
         None => ResolvedModel::default(),
     };
 
-    // §5.5.4 连接健康检查：本地短路，一个字节都不打上游（默认关，见 config 注释）
-    if config.short_circuit_health_check && is_health_check(&data) {
-        eprintln!("  健康检查：本地应答，未打上游");
-        push_log(
-            state.as_ref(),
-            LogEntry {
-                time: chrono_now(),
-                model: resolved.model.clone(),
-                status: 200,
-                thinking: String::new(),
-                note: "已优化：健康检查本地应答".to_string(),
-                error: false,
-            },
-        );
-        return (StatusCode::OK, Json(health_check_reply(&resolved.model))).into_response();
-    }
-
     // 标题生成优化（§5.5.4）+ thinking 三态注入（§3.10），顺序见 prepare_thinking 注释
     let (mut thinking_log, title_optimized) =
-        prepare_thinking(&mut data, &resolved.thinking_effort, config.optimize_title_gen);
+        prepare_thinking(&mut data, &resolved.thinking_effort);
     let mut notes: Vec<&'static str> = Vec::new();
     if title_optimized {
         eprintln!("  标题生成：已降到 effort=low + thinking disabled");
@@ -794,7 +739,6 @@ async fn proxy_fallback(
 
     // 心跳只对流式响应有意义，且要在 data 被整流改写前定下来
     let streaming = wants_stream(&data);
-    let heartbeat_secs = config.heartbeat_secs;
 
     let base = resolved.target_url.trim_end_matches('/');
     let url = format!("{}{}", base, parts.uri.path());
@@ -875,8 +819,8 @@ async fn proxy_fallback(
                 );
             }
             // §3.2：流式响应插 SSE 心跳，非流式保持原样直通（红线：字节等价）
-            let body = if streaming && heartbeat_secs > 0 {
-                Body::from_stream(with_heartbeat(resp.bytes_stream(), heartbeat_secs))
+            let body = if streaming {
+                Body::from_stream(with_heartbeat(resp.bytes_stream(), HEARTBEAT_SECS))
             } else {
                 Body::from_stream(resp.bytes_stream())
             };
@@ -1399,58 +1343,6 @@ mod tests {
         assert_eq!(d["output_config"], serde_json::json!({"effort": "max"}));
     }
 
-    #[test]
-    fn health_check_is_recognised_by_its_exact_shape() {
-        let hc = serde_json::json!({
-            "model": "claude-opus-5",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "."}]
-        });
-        assert!(is_health_check(&hc));
-
-        // 带 system / tools / 多条消息 / 别的正文 / 别的 max_tokens 都不是
-        for tweak in [
-            serde_json::json!({"system": "x"}),
-            serde_json::json!({"tools": []}),
-            serde_json::json!({"max_tokens": 2}),
-        ] {
-            let mut d = hc.clone();
-            for (k, v) in tweak.as_object().unwrap() {
-                d[k] = v.clone();
-            }
-            assert!(!is_health_check(&d), "{d}");
-        }
-        let mut d = hc.clone();
-        d["messages"][0]["content"] = serde_json::json!("hi");
-        assert!(!is_health_check(&d));
-    }
-
-    #[test]
-    fn health_check_reply_is_a_valid_anthropic_message() {
-        let v = health_check_reply("claude-opus-5");
-        assert_eq!(v["type"], "message");
-        assert_eq!(v["role"], "assistant");
-        assert_eq!(v["model"], "claude-opus-5");
-        assert_eq!(v["stop_reason"], "end_turn");
-        assert!(v["content"].as_array().unwrap()[0]["text"].is_string());
-        // 用量必须是 0 —— 这一发没打上游，不能记进任何账
-        assert_eq!(v["usage"]["input_tokens"], 0);
-        assert_eq!(v["usage"]["output_tokens"], 0);
-    }
-
-    #[test]
-    fn streaming_health_check_is_not_short_circuited() {
-        // 本地应答是一个 JSON 对象；请求方要的是 SSE 流的话，直接给 JSON 会把客户端搞崩
-        let mut d = serde_json::json!({
-            "max_tokens": 1,
-            "stream": true,
-            "messages": [{"role": "user", "content": "."}]
-        });
-        assert!(!is_health_check(&d));
-        d["stream"] = serde_json::json!(false);
-        assert!(is_health_check(&d));
-    }
-
     // ---- 标题生成优化与服务商默认档的交互 ----
 
     #[test]
@@ -1458,7 +1350,7 @@ mod tests {
         // 服务商设了默认档（会被 inject_thinking 注入）时，标题优化仍应生效 ——
         // 「桌面端已选」这条豁免只该看**桌面端**发来的值，不该看 ModelLink 自己刚注入的
         let mut d = title_req();
-        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        let (tag, optimized) = prepare_thinking(&mut d, "high");
         assert!(optimized, "服务商默认档不该挡住标题优化");
         assert_eq!(d["output_config"], serde_json::json!({"effort": "low"}));
         assert_eq!(d["thinking"], serde_json::json!({"type": "disabled"}));
@@ -1469,7 +1361,7 @@ mod tests {
     fn title_optimization_still_yields_to_a_desktop_chosen_effort() {
         let mut d = title_req();
         d["output_config"] = serde_json::json!({"effort": "max"});
-        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        let (tag, optimized) = prepare_thinking(&mut d, "high");
         assert!(!optimized);
         assert_eq!(d["output_config"], serde_json::json!({"effort": "max"}));
         assert_eq!(tag, "max");
@@ -1478,18 +1370,10 @@ mod tests {
     #[test]
     fn non_title_requests_go_through_the_normal_three_state_path() {
         let mut d = serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
-        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        let (tag, optimized) = prepare_thinking(&mut d, "high");
         assert!(!optimized);
         assert_eq!(tag, "high");
         assert_eq!(d["output_config"], serde_json::json!({"effort": "high"}));
-    }
-
-    #[test]
-    fn title_optimization_can_be_turned_off() {
-        let mut d = title_req();
-        let (tag, optimized) = prepare_thinking(&mut d, "high", false);
-        assert!(!optimized);
-        assert_eq!(tag, "high", "关掉后走服务商默认档");
     }
 
     // ---- §3.3 未映射槽位的 400 响应体 ----

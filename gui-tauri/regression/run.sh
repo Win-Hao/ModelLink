@@ -96,6 +96,8 @@ DIVERGE = {
     "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
     "unmapped":              "§3.3 未映射槽位不再静默回落",
     "slow-stream":           "§3.2 沉默的流式上游：新版插心跳，v1 纯直通",
+    "budget-reject":         "§3.11.2 budget 下限 → 抬到 32000 重试",
+    "sig-reject":            "§3.11.3 thinking 块签名 → 剥掉后重试",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
     "effort-reject-2":       "§3.11.1 能力缓存命中，effort 直接不发",
 }
@@ -161,6 +163,32 @@ recs = new.get(t, [])
 check(t, len(recs) == 2 and all("metadata" in r.get("body", {}) for r in recs),
       "请求体原样转发（心跳只加在响应侧）")
 
+# §3.11.2 budget 下限：抬到 32000，且 max_tokens 一并提到 64000（budget 必须更小）
+t = "budget-reject"
+recs = new.get(t, [])
+ok = len(recs) == 2
+if ok:
+    first, second = recs[0]["body"], recs[1]["body"]
+    ok = (first["thinking"]["budget_tokens"] == 100
+          and second["thinking"] == {"type": "enabled", "budget_tokens": 32000}
+          and second["max_tokens"] == 64000)
+check(t, ok, "两次转发：budget 100 被拒 → 32000 + max_tokens 提到 64000")
+
+# §3.11.3 thinking 块签名：剥掉历史块与签名后重试
+t = "sig-reject"
+recs = new.get(t, [])
+ok = len(recs) == 2
+if ok:
+    kept = recs[1]["body"]["messages"]
+    ok = (len(recs[0]["body"]["messages"]) == 2
+          and all(b.get("type") != "thinking"
+                  for m in kept if isinstance(m.get("content"), list)
+                  for b in m["content"])
+          and all("signature" not in b
+                  for m in kept if isinstance(m.get("content"), list)
+                  for b in m["content"]))
+check(t, ok, "两次转发：第二次已剥掉 thinking 块与 signature")
+
 # §3.11.1 首发被拒 → 去掉 output_config 重试一次
 t = "effort-reject-1"
 recs = new.get(t, [])
@@ -201,6 +229,18 @@ if [ "$(cat "$EQ/out-new/rectify.status")" = "200" ] && grep -q '"text": *"ok"\|
 else
   echo "✗ 整流后响应异常: $(cat "$EQ/out-new/rectify.status") $(cat "$EQ/out-new/rectify.body")"; fail=1
 fi
+for f in budget sig; do
+  if [ "$(cat "$EQ/out-new/$f.status")" = "200" ]; then
+    echo "✓ $f 整流后对下游返回 200"
+  else
+    echo "✗ $f 整流后响应异常: $(cat "$EQ/out-new/$f.status") $(cat "$EQ/out-new/$f.body")"; fail=1
+  fi
+  if [ "$(cat "$EQ/out-old/$f.status")" = "400" ]; then
+    echo "✓ 对照：v1 把 $f 的 400 原样吐给桌面端"
+  else
+    echo "✗ 对照失败：v1 的 $f.status = $(cat "$EQ/out-old/$f.status")"; fail=1
+  fi
+done
 if [ "$(cat "$EQ/out-old/rectify.status")" = "400" ]; then
   echo "✓ 对照：v1 把上游 400 原样吐给桌面端"
 else

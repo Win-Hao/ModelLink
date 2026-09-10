@@ -83,6 +83,16 @@ curl -s -o "$OUT/nostream.body" -w "%{http_code}" -X POST "$B/v1/messages" \
 
 # ---- 以下用例会污染服务商能力缓存（§3.11.1），必须放在最后 ----
 
+# 16) 上游要求 thinking budget ≥ 1024 → 抬到 32000 重试（§3.11.2）
+curl -s -o "$OUT/budget.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":100},"metadata":{"user_id":"budget-reject"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/budget.status"
+
+# 17) 上游验不了历史 thinking 块签名 → 剥掉后重试（§3.11.3）
+curl -s -o "$OUT/sig.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":5,"metadata":{"user_id":"sig-reject"},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"sig1"},{"type":"text","text":"y"}]}]}' > "$OUT/sig.status"
+
 # 12) 上游拒收 output_config → 代理层整流重试
 #     ⚠️ 2.1-A §3.11.1 有意不等价：v1 原样吐 400；新版去掉 output_config 重试成功。
 curl -s -o "$OUT/rectify.body" -w "%{http_code}" -X POST "$B/v1/messages" \

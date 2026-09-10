@@ -6,6 +6,10 @@
 
 2.1-C 新增：metadata.user_id == "slow-stream" 的请求返回一个先沉默 SILENCE_SECS
 再吐事件的 SSE 流，用于验证 §3.2 的心跳合流（沉默期间下游应持续收到 `: ping`）。
+
+2.1-C+ 新增：
+- "budget-reject"：thinking.budget_tokens < 1024 就回 400（§3.11.2）
+- "sig-reject"：messages 里出现 thinking 块就回 400（§3.11.3）
 """
 import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +30,27 @@ OK = json.dumps({"id": "msg_test", "type": "message",
 # 回归配置把心跳间隔调到 2s，7s 沉默即可观察到 3 次心跳，机制完全一样但跑得快。
 SILENCE_SECS = 7
 
+REJECT_BUDGET = json.dumps({
+    "type": "error",
+    "error": {"type": "invalid_request_error",
+              "message": "thinking.budget_tokens: Input should be greater than or equal to 1024"},
+}).encode()
+
+REJECT_SIG = json.dumps({
+    "type": "error",
+    "error": {"type": "invalid_request_error",
+              "message": "messages.1.content.0: invalid signature on thinking block"},
+}).encode()
+
+
+def has_thinking_block(body):
+    for m in (body or {}).get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):
+            if any(b.get("type") in ("thinking", "redacted_thinking") for b in content):
+                return True
+    return False
+
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -45,6 +70,11 @@ class H(BaseHTTPRequestHandler):
         tag = ((body or {}).get("metadata") or {}).get("user_id", "")
         if tag == "slow-stream":
             self.silent_sse()
+        elif tag.startswith("budget-reject") and \
+                ((body or {}).get("thinking") or {}).get("budget_tokens", 99999) < 1024:
+            self.reply(400, REJECT_BUDGET)
+        elif tag.startswith("sig-reject") and has_thinking_block(body):
+            self.reply(400, REJECT_SIG)
         elif tag.startswith("effort-reject") and "output_config" in (body or {}):
             self.reply(400, REJECT_EFFORT)
         else:

@@ -57,6 +57,8 @@ pub struct LogEntry {
 pub struct ThinkingCaps {
     /// 上游是否接受 `output_config.effort`。None = 未知（乐观发送）。
     pub effort_supported: Option<bool>,
+    /// 上游是否吃得下历史消息里的 thinking / redacted_thinking 块（§3.11.3）。
+    pub accepts_thinking_blocks: Option<bool>,
 }
 
 /// 代理与命令层共享的全局状态（与 v1 AppState 同构 + 2.0 运行态：端口热切换）。
@@ -121,6 +123,25 @@ impl ProxyState {
             .entry((url.to_string(), model.to_string()))
             .or_default()
             .effort_supported = Some(false);
+    }
+
+    /// 该服务商 + 上游模型是否已知收不了历史 thinking 块（§3.11.3 副作用）。
+    pub fn thinking_blocks_rejected(&self, url: &str, model: &str) -> bool {
+        self.caps
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(url.to_string(), model.to_string()))
+            .and_then(|c| c.accepts_thinking_blocks)
+            == Some(false)
+    }
+
+    pub fn mark_thinking_blocks_rejected(&self, url: &str, model: &str) {
+        self.caps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry((url.to_string(), model.to_string()))
+            .or_default()
+            .accepts_thinking_blocks = Some(false);
     }
 }
 
@@ -233,12 +254,15 @@ pub(crate) fn inject_thinking(data: &mut serde_json::Value, te: &str) -> String 
     te.to_string()
 }
 
-/// 整流器种类（§3.11）。A 批只实现 effort（§3.11.1）；
-/// §3.11.2 budget 约束 / §3.11.3 thinking 块签名后续批次接进同一张表。
+/// 整流器种类（§3.11）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Rectifier {
     /// 上游不接受 `output_config.effort` → 移除后重试（§3.11.1）。
     Effort,
+    /// 上游对 thinking budget 有下限要求 → 抬到 32000 后重试（§3.11.2）。
+    ThinkingBudget,
+    /// 上游验不了历史消息里的 thinking 块签名 → 剥掉后重试（§3.11.3）。
+    ThinkingBlocks,
 }
 
 impl Rectifier {
@@ -246,6 +270,8 @@ impl Rectifier {
     pub(crate) fn success_note(self) -> &'static str {
         match self {
             Rectifier::Effort => "已自动修复：effort 不支持",
+            Rectifier::ThinkingBudget => "已自动修复：thinking budget 下限",
+            Rectifier::ThinkingBlocks => "已自动修复：thinking 块签名",
         }
     }
 
@@ -253,6 +279,17 @@ impl Rectifier {
     pub(crate) fn attempt_note(self) -> &'static str {
         match self {
             Rectifier::Effort => "移除 output_config.effort",
+            Rectifier::ThinkingBudget => "抬高 thinking.budget_tokens",
+            Rectifier::ThinkingBlocks => "移除历史 thinking 块与签名",
+        }
+    }
+
+    /// 整流没救回来时写进日志的标记。
+    pub(crate) fn failed_note(self) -> &'static str {
+        match self {
+            Rectifier::Effort => "自动修复未生效：effort",
+            Rectifier::ThinkingBudget => "自动修复未生效：budget",
+            Rectifier::ThinkingBlocks => "自动修复未生效：thinking 块",
         }
     }
 }
@@ -270,17 +307,156 @@ pub(crate) fn upstream_error_message(body: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
 }
 
-/// §3.11.1 触发判定。两条路：
-/// - 错误消息明确提到 `output_config` / `effort` —— 确定命中；
-/// - 形态未知的兼容端点只给一句泛泛的 400 —— 投机重试一次，
-///   「去掉 output_config 后即成功」才反过来认定它不支持（见调用处：只有重试
-///   成功才写能力缓存）。401/403/404/429 显然与请求体无关，不投机。
-pub(crate) fn effort_rectifier_applies(status: u16, msg: &str, has_output_config: bool) -> bool {
+/// §3.11.1 触发判定之一：错误消息明确点名 `output_config` / `effort` —— 确定命中。
+pub(crate) fn effort_error_explicit(status: u16, msg: &str, has_output_config: bool) -> bool {
     if !has_output_config || !(400..500).contains(&status) {
         return false;
     }
     let m = msg.to_ascii_lowercase();
-    m.contains("output_config") || m.contains("effort") || status == 400
+    m.contains("output_config") || m.contains("effort")
+}
+
+/// §3.11.1 触发判定之二：形态未知的兼容端点只给一句泛泛的 400 —— 投机重试一次。
+/// 「去掉 output_config 后即成功」才反过来认定它不支持（调用处只在重试成功时写
+/// 能力缓存）。401/403/404/429 显然与请求体无关，不投机。
+///
+/// ⚠️ 必须**排在其它整流器之后**判定：budget / thinking 块的报错同样是 400，
+/// 让投机分支先命中就会去删一个跟错误无关的字段，白白浪费一次整流额度。
+pub(crate) fn effort_error_speculative(status: u16, has_output_config: bool) -> bool {
+    has_output_config && status == 400
+}
+
+/// §3.11.2 触发判定：错误消息**同时**含 budget 字样 + thinking + 1024 下限约束。
+///
+/// 例外：`thinking.type == "adaptive"` 的请求不改写 —— 自适应思考没有 budget 概念，
+/// 硬塞一个 budget_tokens 只会换来一个新错误。
+pub(crate) fn budget_rectifier_applies(status: u16, msg: &str, data: &serde_json::Value) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    if data.get("thinking").and_then(|t| t.get("type")).and_then(|t| t.as_str()) == Some("adaptive")
+    {
+        return false;
+    }
+    let m = msg.to_ascii_lowercase();
+    let has_budget = m.contains("budget_tokens") || m.contains("budget tokens");
+    let has_thinking = m.contains("thinking");
+    let has_min = m.contains("greater than or equal to 1024")
+        || m.contains(">= 1024")
+        || (m.contains("1024") && m.contains("input should be"));
+    has_budget && has_thinking && has_min
+}
+
+/// §3.11.2 动作：把 thinking 改成 enabled + 32000 budget；
+/// budget 必须小于 max_tokens，所以 max_tokens 不够大时一并提到 64000。
+pub(crate) fn apply_budget_fix(data: &mut serde_json::Value) -> bool {
+    data["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 32000});
+    let max_tokens = data.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    if max_tokens < 32001 {
+        data["max_tokens"] = serde_json::json!(64000);
+    }
+    true
+}
+
+/// §3.11.3 触发判定：历史消息里的 thinking / redacted_thinking block 与 signature
+/// 是 Anthropic 官方的加密产物，第三方端点大多验不了或直接拒收。六种已知报法。
+pub(crate) fn thinking_blocks_rectifier_applies(status: u16, msg: &str) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let m = msg.to_ascii_lowercase();
+    let sig = m.contains("signature");
+    (m.contains("invalid") && sig && m.contains("thinking") && m.contains("block"))
+        || (m.contains("thought signature") && (m.contains("not valid") || m.contains("invalid")))
+        || m.contains("must start with a thinking block")
+        || (m.contains("expected")
+            && (m.contains("thinking") || m.contains("redacted_thinking"))
+            && m.contains("found")
+            && m.contains("tool_use"))
+        || (sig && m.contains("field required"))
+        || (sig && m.contains("extra inputs are not permitted"))
+}
+
+/// 给这次 4xx 挑一个整流器（§3.11）。同类每请求只做一次，故传入已用过的列表。
+///
+/// 顺序即优先级：先试「错误消息明确点名」的，最后才是 effort 的投机分支 ——
+/// budget 与 thinking 块的报错同样是 400，让投机分支先命中会白白浪费一次整流额度，
+/// 而且删错了字段（去掉 effort 治不好 budget 下限）。
+pub(crate) fn pick_rectifier(
+    status: u16,
+    msg: &str,
+    data: &serde_json::Value,
+    applied: &[Rectifier],
+) -> Option<Rectifier> {
+    let has_oc = data.get("output_config").is_some();
+    let unused = |r: Rectifier| !applied.contains(&r);
+
+    if unused(Rectifier::Effort) && effort_error_explicit(status, msg, has_oc) {
+        Some(Rectifier::Effort)
+    } else if unused(Rectifier::ThinkingBudget) && budget_rectifier_applies(status, msg, data) {
+        Some(Rectifier::ThinkingBudget)
+    } else if unused(Rectifier::ThinkingBlocks) && thinking_blocks_rectifier_applies(status, msg) {
+        Some(Rectifier::ThinkingBlocks)
+    } else if unused(Rectifier::Effort) && effort_error_speculative(status, has_oc) {
+        Some(Rectifier::Effort)
+    } else {
+        None
+    }
+}
+
+/// §3.11.3 的整流统计，写进请求日志。
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct StripStats {
+    pub thinking: usize,
+    pub redacted: usize,
+    pub signatures: usize,
+}
+
+impl StripStats {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.thinking == 0 && self.redacted == 0 && self.signatures == 0
+    }
+}
+
+/// §3.11.3 动作：移除 messages 里全部 thinking / redacted_thinking block
+/// 及其余块上的 signature 字段。块被删光的 assistant 消息整条移除 ——
+/// 留一个空 content 数组多数端点同样会拒。
+pub(crate) fn strip_thinking_blocks(data: &mut serde_json::Value) -> StripStats {
+    let mut stats = StripStats::default();
+    let Some(messages) = data.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return stats;
+    };
+    for msg in messages.iter_mut() {
+        let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue; // 纯字符串 content 不动
+        };
+        blocks.retain(|b| match b.get("type").and_then(|t| t.as_str()) {
+            Some("thinking") => {
+                stats.thinking += 1;
+                false
+            }
+            Some("redacted_thinking") => {
+                stats.redacted += 1;
+                false
+            }
+            _ => true,
+        });
+        for b in blocks.iter_mut() {
+            if let Some(obj) = b.as_object_mut() {
+                if obj.remove("signature").is_some() {
+                    stats.signatures += 1;
+                }
+            }
+        }
+    }
+    // content 被删空的消息整条丢掉
+    messages.retain(|m| {
+        m.get("content")
+            .and_then(|c| c.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(true)
+    });
+    stats
 }
 
 /// 移除 `output_config`；返回是否真的移除了东西（没得改就别算一次整流）。
@@ -474,6 +650,13 @@ async fn proxy_fallback(
         notes.push("effort 不支持（已缓存）");
         thinking_log = String::new();
     }
+    if state.thinking_blocks_rejected(&resolved.target_url, &resolved.model) {
+        let st = strip_thinking_blocks(&mut data);
+        if !st.is_empty() {
+            eprintln!("  thinking 块: 上游已知不接受，本次先剥掉 {} 块", st.thinking + st.redacted);
+            notes.push("thinking 块不支持（已缓存）");
+        }
+    }
 
     // 心跳只对流式响应有意义，且要在 data 被整流改写前定下来
     let streaming = wants_stream(&data);
@@ -525,18 +708,20 @@ async fn proxy_fallback(
         if !(400..500).contains(&raw_status) {
             for r in &applied {
                 if raw_status < 400 {
-                    // 整流后这一发成了：记住能力，后续请求直接不发（§3.11.1 副作用）
+                    // 整流后这一发成了：记住能力，后续请求直接不发（§3.11 副作用）
                     match r {
                         Rectifier::Effort => {
                             state.mark_effort_unsupported(&resolved.target_url, &resolved.model)
                         }
+                        Rectifier::ThinkingBlocks => state
+                            .mark_thinking_blocks_rejected(&resolved.target_url, &resolved.model),
+                        // budget 下限是每请求的取值问题，不是服务商能力，不进缓存
+                        Rectifier::ThinkingBudget => {}
                     }
                     notes.push(r.success_note());
                 } else {
                     // 5xx：换了个失败方式，不足以断定上游不支持 —— 不写缓存，但要留痕
-                    notes.push(match r {
-                        Rectifier::Effort => "已尝试修复：effort",
-                    });
+                    notes.push("已尝试自动修复");
                 }
             }
             let status =
@@ -570,17 +755,40 @@ async fn proxy_fallback(
         let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
         let msg = upstream_error_message(&body);
 
-        // §3.11.1 effort 整流
-        if applied.len() < MAX_RECTIFY
-            && !applied.contains(&Rectifier::Effort)
-            && effort_rectifier_applies(raw_status, &msg, data.get("output_config").is_some())
-            && strip_output_config(&mut data)
-        {
-            eprintln!("  rectify: 移除 output_config 后重试（上游 {}: {}）", raw_status, msg);
-            applied.push(Rectifier::Effort);
-            thinking_log = String::new();
-            first_error.get_or_insert((raw_status, headers, body));
-            continue;
+        // 挑一个整流器（§3.11）。顺序即优先级：先试「错误消息明确点名」的，
+        // 最后才是 effort 的投机分支 —— budget / thinking 块的报错同样是 400，
+        // 让投机分支先命中会白白浪费一次整流额度。
+        let pick = pick_rectifier(raw_status, &msg, &data, &applied);
+
+        if applied.len() < MAX_RECTIFY {
+            if let Some(r) = pick {
+                let changed = match r {
+                    Rectifier::Effort => {
+                        let ok = strip_output_config(&mut data);
+                        if ok {
+                            thinking_log = String::new();
+                        }
+                        ok
+                    }
+                    Rectifier::ThinkingBudget => apply_budget_fix(&mut data),
+                    Rectifier::ThinkingBlocks => {
+                        let st = strip_thinking_blocks(&mut data);
+                        if !st.is_empty() {
+                            eprintln!(
+                                "  rectify: 移除 {} 个 thinking 块 / {} 个 redacted 块 / {} 个签名",
+                                st.thinking, st.redacted, st.signatures
+                            );
+                        }
+                        !st.is_empty()
+                    }
+                };
+                if changed {
+                    eprintln!("  rectify: {}（上游 {}: {}）", r.attempt_note(), raw_status, msg);
+                    applied.push(r);
+                    first_error.get_or_insert((raw_status, headers, body));
+                    continue;
+                }
+            }
         }
 
         // 无整流可做（或整流后仍失败）→ 原样返回最初的错误。
@@ -590,9 +798,7 @@ async fn proxy_fallback(
     // 走到这里说明最终仍是 4xx：整流（若有）没能救回来。
     if let Some(r) = applied.last() {
         eprintln!("  rectify: 未生效，原样返回上游错误");
-        notes.push(match r {
-            Rectifier::Effort => "自动修复未生效：effort",
-        });
+        notes.push(r.failed_note());
     }
 
     let status = StatusCode::from_u16(raw_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -775,33 +981,80 @@ mod tests {
 
     // ---- §3.11.1 effort 整流 ----
 
+    fn with_oc() -> serde_json::Value {
+        serde_json::json!({"output_config": {"effort": "max"}})
+    }
+
     #[test]
     fn effort_rectifier_matches_explicit_error_messages() {
-        assert!(effort_rectifier_applies(
-            400,
+        for msg in [
             "output_config: extra inputs are not permitted",
-            true
-        ));
-        assert!(effort_rectifier_applies(422, "unknown field `effort`", true));
-        // 大小写不敏感
-        assert!(effort_rectifier_applies(422, "Unsupported EFFORT level", true));
+            "unknown field `effort`",
+            "Unsupported EFFORT level", // 大小写不敏感
+        ] {
+            assert_eq!(
+                pick_rectifier(422, msg, &with_oc(), &[]),
+                Some(Rectifier::Effort),
+                "应命中: {msg}"
+            );
+        }
     }
 
     #[test]
     fn effort_rectifier_speculates_only_on_plain_400() {
         // 形态未知的 400 → 投机重试一次
-        assert!(effort_rectifier_applies(400, "bad request", true));
+        assert_eq!(
+            pick_rectifier(400, "bad request", &with_oc(), &[]),
+            Some(Rectifier::Effort)
+        );
         // 与请求体无关的 4xx → 不动
-        assert!(!effort_rectifier_applies(401, "invalid api key", true));
-        assert!(!effort_rectifier_applies(429, "rate limited", true));
-        assert!(!effort_rectifier_applies(404, "not found", true));
+        for (st, msg) in [(401, "invalid api key"), (429, "rate limited"), (404, "not found")] {
+            assert_eq!(pick_rectifier(st, msg, &with_oc(), &[]), None, "{st} 不该整流");
+        }
     }
 
     #[test]
     fn effort_rectifier_skips_when_nothing_to_strip_or_not_4xx() {
-        assert!(!effort_rectifier_applies(400, "effort bad", false));
-        assert!(!effort_rectifier_applies(500, "effort bad", true));
-        assert!(!effort_rectifier_applies(200, "effort bad", true));
+        assert_eq!(pick_rectifier(400, "effort bad", &serde_json::json!({}), &[]), None);
+        assert_eq!(pick_rectifier(500, "effort bad", &with_oc(), &[]), None);
+        assert_eq!(pick_rectifier(200, "effort bad", &with_oc(), &[]), None);
+    }
+
+    #[test]
+    fn specific_rectifiers_win_over_the_speculative_effort_branch() {
+        // 关键顺序：budget / thinking 块的报错也是 400 且请求里带着 output_config，
+        // 若让 effort 的投机分支先命中，就会去删一个跟错误无关的字段。
+        let mut d = with_oc();
+        d["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 100});
+        assert_eq!(
+            pick_rectifier(
+                400,
+                "thinking.budget_tokens: Input should be greater than or equal to 1024",
+                &d,
+                &[]
+            ),
+            Some(Rectifier::ThinkingBudget)
+        );
+        assert_eq!(
+            pick_rectifier(400, "invalid signature on thinking block", &with_oc(), &[]),
+            Some(Rectifier::ThinkingBlocks)
+        );
+    }
+
+    #[test]
+    fn each_rectifier_is_offered_at_most_once_per_request() {
+        // §3.11 通用约束：同类只做一次，防循环
+        assert_eq!(
+            pick_rectifier(400, "bad request", &with_oc(), &[Rectifier::Effort]),
+            None
+        );
+        let mut d = with_oc();
+        d["thinking"] = serde_json::json!({"type": "enabled", "budget_tokens": 100});
+        // budget 已经试过 → 退回 effort 的投机分支
+        assert_eq!(
+            pick_rectifier(400, "thinking budget_tokens >= 1024", &d, &[Rectifier::ThinkingBudget]),
+            Some(Rectifier::Effort)
+        );
     }
 
     #[test]
@@ -937,6 +1190,126 @@ mod tests {
             v["error"]["message"],
             "ModelLink: 模型槽位 claude-opus-5 未映射到任何服务商。请在 ModelLink 中配置后重试。"
         );
+    }
+
+    // ---- §3.11.2 thinking budget 约束 ----
+
+    #[test]
+    fn budget_rectifier_matches_the_1024_lower_bound_complaints() {
+        let d = serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 100}});
+        for msg in [
+            "thinking.budget_tokens: Input should be greater than or equal to 1024",
+            "invalid thinking budget tokens, must be >= 1024",
+            "thinking.budget_tokens: input should be 1024 or more",
+        ] {
+            assert!(budget_rectifier_applies(400, msg, &d), "应命中: {msg}");
+        }
+    }
+
+    #[test]
+    fn budget_rectifier_needs_all_three_signals() {
+        let d = serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 100}});
+        // 缺 thinking
+        assert!(!budget_rectifier_applies(400, "budget_tokens must be >= 1024", &d));
+        // 缺 1024 下限约束
+        assert!(!budget_rectifier_applies(400, "thinking.budget_tokens is wrong", &d));
+        // 缺 budget 字样
+        assert!(!budget_rectifier_applies(400, "thinking must be >= 1024", &d));
+        // 非 4xx
+        assert!(!budget_rectifier_applies(500, "thinking.budget_tokens >= 1024", &d));
+    }
+
+    #[test]
+    fn budget_rectifier_never_touches_adaptive_thinking() {
+        // 自适应思考没有 budget 概念，改了反而报新错
+        let d = serde_json::json!({"thinking": {"type": "adaptive"}});
+        assert!(!budget_rectifier_applies(
+            400,
+            "thinking.budget_tokens: Input should be greater than or equal to 1024",
+            &d
+        ));
+    }
+
+    #[test]
+    fn budget_fix_raises_budget_and_max_tokens_together() {
+        let mut d = serde_json::json!({
+            "max_tokens": 4096,
+            "thinking": {"type": "enabled", "budget_tokens": 100}
+        });
+        assert!(apply_budget_fix(&mut d));
+        assert_eq!(d["thinking"], serde_json::json!({"type": "enabled", "budget_tokens": 32000}));
+        // budget 必须小于 max_tokens，否则换来一个新错误
+        assert_eq!(d["max_tokens"], 64000);
+    }
+
+    #[test]
+    fn budget_fix_leaves_a_large_enough_max_tokens_alone() {
+        let mut d = serde_json::json!({"max_tokens": 64000, "thinking": {"type": "disabled"}});
+        assert!(apply_budget_fix(&mut d));
+        assert_eq!(d["thinking"]["budget_tokens"], 32000);
+        assert_eq!(d["thinking"]["type"], "enabled");
+        assert_eq!(d["max_tokens"], 64000, "够大就别动用户的设置");
+    }
+
+    // ---- §3.11.3 thinking 块结构 / 签名 ----
+
+    #[test]
+    fn thinking_block_rectifier_matches_every_documented_shape() {
+        for msg in [
+            "invalid signature on thinking block",
+            "thought signature is not valid",
+            "The thought signature was invalid",
+            "messages.1: must start with a thinking block",
+            "expected thinking or redacted_thinking but found tool_use",
+            "messages.1.content.0.signature: field required",
+            "messages.1.content.0.signature: extra inputs are not permitted",
+        ] {
+            assert!(thinking_blocks_rectifier_applies(400, msg), "应命中: {msg}");
+        }
+    }
+
+    #[test]
+    fn thinking_block_rectifier_ignores_unrelated_errors() {
+        assert!(!thinking_blocks_rectifier_applies(400, "invalid api key"));
+        assert!(!thinking_blocks_rectifier_applies(400, "signature"));
+        assert!(!thinking_blocks_rectifier_applies(500, "invalid signature thinking block"));
+    }
+
+    #[test]
+    fn stripping_removes_thinking_blocks_and_signatures_with_counts() {
+        let mut d = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "嗯…", "signature": "abc"},
+                    {"type": "redacted_thinking", "data": "xxx"},
+                    {"type": "text", "text": "答案"},
+                    {"type": "tool_use", "id": "t1", "name": "f", "input": {}, "signature": "def"}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "再想想", "signature": "ghi"}
+                ]}
+            ]
+        });
+        let stats = strip_thinking_blocks(&mut d);
+        assert_eq!((stats.thinking, stats.redacted, stats.signatures), (2, 1, 1));
+        // 字符串 content 不动
+        assert_eq!(d["messages"][0]["content"], "hi");
+        // 只剩 text 与 tool_use，且 tool_use 上的签名被摘掉
+        let kept = d["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0]["type"], "text");
+        assert_eq!(kept[1]["type"], "tool_use");
+        assert!(kept[1].get("signature").is_none());
+        // 整条消息的块被删光后，不能留一个空 content 数组（多数端点会拒）
+        assert_eq!(d["messages"].as_array().unwrap().len(), 2, "空 assistant 消息应被移除");
+    }
+
+    #[test]
+    fn stripping_reports_nothing_when_there_is_nothing_to_strip() {
+        let mut d = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let stats = strip_thinking_blocks(&mut d);
+        assert!(stats.is_empty());
     }
 
     // ---- §3.11.4 能力缓存（按服务商 + 真实上游模型 ID，绝不按槽位名） ----

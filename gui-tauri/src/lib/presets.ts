@@ -10,6 +10,18 @@ export const MAX_MODELS = 20;
 /** 镜像后端 config.rs::FAMILY_TIERS（app.asar 里的 Ba 数组，§3.5）。 */
 export const FAMILY_TIERS = ["sonnet", "opus", "haiku", "fable", "mythos"] as const;
 
+/** §3.8：键 → 用户看得懂的能力名，用于「因版本过低不可用」提示。 */
+export const KEY_FEATURE_NAMES: Record<string, string> = {
+  chatTabEnabled: "Chat 页",
+  labelOverride: "模型显示真名",
+  inferenceModelPricingEnabled: "费用估算",
+  inferenceModelPricing: "自定义费率",
+  organizationInstructions: "组织级指令",
+  inferenceStreamIdleTimeoutSec: "长生成防断流",
+  egressProxyUrl: "网络代理",
+  egressProxyPacUrl: "PAC 代理",
+};
+
 /** organizationInstructions 的硬上限（app.asar：D().trim().min(1).max(3e3)）。 */
 export const ORG_INSTRUCTIONS_MAX = 3000;
 

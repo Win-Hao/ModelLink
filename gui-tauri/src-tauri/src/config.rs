@@ -160,6 +160,13 @@ pub struct Config {
     /// 「我是 Claude，由 Anthropic 开发」。
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub org_identity_note: bool,
+    /// 2.1-E 新增（§3.9）：Claude Desktop 出网代理。只接受 http:// / https://，
+    /// 不接受内嵌账号密码；空 = 不设。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub egress_proxy_url: String,
+    /// 2.1-E 新增（§3.9）：PAC 自动配置地址。设了它就压过 `egress_proxy_url`。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub egress_proxy_pac_url: String,
     /// 2.1-C 新增（§3.2）：流式响应的 SSE 心跳间隔（秒）。0 = 关闭。
     /// 上游沉默超过这个时长就往下游写一行 `: ping`，配合
     /// `inferenceStreamIdleTimeoutSec` 治长生成断流。
@@ -181,6 +188,8 @@ impl Default for Config {
             pricing_synced_at: String::new(),
             org_instructions: String::new(),
             org_identity_note: true,
+            egress_proxy_url: String::new(),
+            egress_proxy_pac_url: String::new(),
             heartbeat_secs: DEFAULT_HEARTBEAT_SECS,
         }
     }

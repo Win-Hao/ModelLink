@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use crate::config::{flatten_config, write_with_retry, Config};
+use crate::desktop_version::VersionGate;
 
 pub fn claude_3p_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME")
@@ -64,7 +65,7 @@ pub fn claude_3p_dir() -> Option<PathBuf> {
 /// 网关配置里 ModelLink 负责的那几个键 —— 启动自动配置与「应用」按钮的唯一写入点。
 /// 调用方先读出已有 JSON，这里只改这几个键，其余字段原样保留（用户在 Claude Desktop
 /// 里的其它设置不受影响）。
-fn write_gateway_keys(existing: &mut serde_json::Value, port: u16) {
+fn write_gateway_keys(existing: &mut serde_json::Value, port: u16, gate: &VersionGate) {
     existing["coworkEgressAllowedHosts"] = serde_json::json!(["*"]);
     existing["inferenceProvider"] = serde_json::json!("gateway");
     existing["inferenceGatewayBaseUrl"] = serde_json::json!(format!("http://127.0.0.1:{}", port));
@@ -76,7 +77,9 @@ fn write_gateway_keys(existing: &mut serde_json::Value, port: u16) {
     // default:true，唯独 chatTabEnabled 没有 —— 不写就是关的，用户装完看不到 Chat 页。
     // （1.13576.0 起支持；低于该版本的老客户端会忽略未知键。按版本门槛跳过写入
     //   属于 §3.8 版本自适应，排在 E 批。）
-    existing["chatTabEnabled"] = serde_json::json!(true);
+    if gate.allows("chatTabEnabled") {
+        existing["chatTabEnabled"] = serde_json::json!(true);
+    }
     // 免去每次启动都要选部署模式
     existing["disableDeploymentModeChooser"] = serde_json::json!(true);
     // 2.1-C §3.2：流式响应的空闲等待上限，取 schema 允许的最大值。
@@ -84,7 +87,60 @@ fn write_gateway_keys(existing: &mut serde_json::Value, port: u16) {
     // "A response on which nothing at all arrives — no pings — still fails after
     //  about 5 minutes regardless of this key"。所以它必须和 proxy.rs 的心跳合流
     // 配套交付，单写这个键治不了断流。（1.44121.1 起支持，值域 300–1800。）
-    existing["inferenceStreamIdleTimeoutSec"] = serde_json::json!(1800);
+    if gate.allows("inferenceStreamIdleTimeoutSec") {
+        existing["inferenceStreamIdleTimeoutSec"] = serde_json::json!(1800);
+    }
+}
+
+/// §3.9 网络代理透传。约束照 app 内的说明逐条对齐：
+/// - 只接受 `http://` / `https://`，SOCKS 被拒；
+/// - 不接受内嵌账号密码（`user:pass@`）；
+/// - `localhost` / `127.0.0.1` / `[::1]` / `*.local` 由 app 自动 bypass，
+///   所以 ModelLink 自己的 127.0.0.1 网关不受影响；
+/// - 代理不通**直接失败，不回落直连**；
+/// - 只在启动时读一次，改了要重启 Claude。
+///
+/// PAC 一旦设了就压过普通代理（app 原文："the PAC file wins and this key is ignored"），
+/// 所以两个都填时只写 PAC，免得用户以为普通代理还在生效。
+pub fn egress_proxy_url_valid(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty() {
+        return false;
+    }
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return false;
+    }
+    // 内嵌账号密码：scheme 之后、第一个 / 之前出现 @
+    let rest = u.split_once("://").map(|(_, r)| r).unwrap_or("");
+    let authority = rest.split('/').next().unwrap_or("");
+    !authority.contains('@')
+}
+
+fn write_egress_proxy(existing: &mut serde_json::Value, config: &Config, gate: &VersionGate) {
+    let remove = |e: &mut serde_json::Value, k: &str| {
+        if let Some(o) = e.as_object_mut() {
+            o.remove(k);
+        }
+    };
+    if !gate.allows("egressProxyUrl") {
+        remove(existing, "egressProxyUrl");
+        remove(existing, "egressProxyPacUrl");
+        return;
+    }
+    let pac = config.egress_proxy_pac_url.trim();
+    let plain = config.egress_proxy_url.trim();
+
+    if egress_proxy_url_valid(pac) {
+        existing["egressProxyPacUrl"] = serde_json::json!(pac);
+        // PAC 生效时普通代理会被忽略，别留一个看着像在用的键
+        remove(existing, "egressProxyUrl");
+    } else if egress_proxy_url_valid(plain) {
+        existing["egressProxyUrl"] = serde_json::json!(plain);
+        remove(existing, "egressProxyPacUrl");
+    } else {
+        remove(existing, "egressProxyUrl");
+        remove(existing, "egressProxyPacUrl");
+    }
 }
 
 pub fn ensure_claude_desktop_gateway(port: u16) {
@@ -127,7 +183,8 @@ pub fn ensure_claude_desktop_gateway(port: u16) {
         serde_json::json!({})
     };
 
-    write_gateway_keys(&mut existing, port);
+    let gate = VersionGate::detect();
+    write_gateway_keys(&mut existing, port, &gate);
     if existing.get("inferenceModels").is_none() {
         existing["inferenceModels"] = serde_json::json!([]);
     }
@@ -451,17 +508,23 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
         serde_json::json!({})
     };
 
-    write_gateway_keys(&mut existing, config.port);
+    let gate = VersionGate::detect();
+    write_gateway_keys(&mut existing, config.port, &gate);
     existing["inferenceModels"] = serde_json::json!(models);
-    write_pricing_keys(&mut existing, &flat, config.usd_rate);
+    if gate.allows("inferenceModelPricing") {
+        write_pricing_keys(&mut existing, &flat, config.usd_rate);
+    }
+    write_egress_proxy(&mut existing, config, &gate);
     let slot_map: Vec<(String, String)> =
         flat.iter().map(|e| (e.slot.clone(), e.name.clone())).collect();
-    write_org_instructions(
-        &mut existing,
-        &config.org_instructions,
-        config.org_identity_note,
-        &slot_map,
-    );
+    if gate.allows("organizationInstructions") {
+        write_org_instructions(
+            &mut existing,
+            &config.org_instructions,
+            config.org_identity_note,
+            &slot_map,
+        );
+    }
 
     let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
     write_with_retry(&config_file, &data)?;
@@ -654,6 +717,79 @@ pub fn restart_claude_desktop() {
 mod tests {
     use super::*;
     use crate::config::{flatten_config, ModelEntry, ModelPricing, Provider};
+
+    // ---- §3.8 版本自适应 / §3.9 网络代理 ----
+
+    #[test]
+    fn old_desktop_does_not_get_keys_it_cannot_parse() {
+        let mut existing = serde_json::json!({});
+        write_gateway_keys(&mut existing, 5678, &VersionGate::with_version(Some("1.20000.0")));
+        // 1.13576.0 起支持 → 写
+        assert_eq!(existing["chatTabEnabled"], true);
+        // 1.44121.1 起支持 → 不写
+        assert!(existing.get("inferenceStreamIdleTimeoutSec").is_none());
+        // 没门槛的键照写
+        assert_eq!(existing["inferenceProvider"], "gateway");
+    }
+
+    #[test]
+    fn ancient_desktop_loses_chat_tab_as_well() {
+        let mut existing = serde_json::json!({});
+        write_gateway_keys(&mut existing, 5678, &VersionGate::with_version(Some("1.10000.0")));
+        assert!(existing.get("chatTabEnabled").is_none());
+    }
+
+    #[test]
+    fn egress_proxy_accepts_only_what_the_app_accepts() {
+        assert!(egress_proxy_url_valid("http://proxy.corp:8080"));
+        assert!(egress_proxy_url_valid("https://proxy.corp:8080/path"));
+        // SOCKS 被拒
+        assert!(!egress_proxy_url_valid("socks5://proxy.corp:1080"));
+        // 内嵌账号密码被拒
+        assert!(!egress_proxy_url_valid("http://user:pass@proxy.corp:8080"));
+        // 路径里的 @ 不算
+        assert!(egress_proxy_url_valid("http://proxy.corp/a@b"));
+        assert!(!egress_proxy_url_valid(""));
+        assert!(!egress_proxy_url_valid("proxy.corp:8080"));
+    }
+
+    #[test]
+    fn pac_url_wins_over_the_plain_proxy() {
+        // app 原文："When egressProxyPacUrl is also set, the PAC file wins and
+        // this key is ignored" —— 别留一个看着像在用的键
+        let mut existing = serde_json::json!({});
+        let cfg = Config {
+            egress_proxy_url: "http://proxy.corp:8080".into(),
+            egress_proxy_pac_url: "https://corp/proxy.pac".into(),
+            ..Default::default()
+        };
+        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(None));
+        assert_eq!(existing["egressProxyPacUrl"], "https://corp/proxy.pac");
+        assert!(existing.get("egressProxyUrl").is_none());
+    }
+
+    #[test]
+    fn invalid_or_absent_proxy_clears_both_keys() {
+        let mut existing = serde_json::json!({
+            "egressProxyUrl": "http://old:8080",
+            "egressProxyPacUrl": "https://old/x.pac"
+        });
+        let cfg = Config {
+            egress_proxy_url: "socks5://nope:1080".into(),
+            ..Default::default()
+        };
+        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(None));
+        assert!(existing.get("egressProxyUrl").is_none());
+        assert!(existing.get("egressProxyPacUrl").is_none());
+    }
+
+    #[test]
+    fn old_desktop_never_gets_proxy_keys() {
+        let mut existing = serde_json::json!({});
+        let cfg = Config { egress_proxy_url: "http://proxy.corp:8080".into(), ..Default::default() };
+        write_egress_proxy(&mut existing, &cfg, &VersionGate::with_version(Some("1.40000.0")));
+        assert!(existing.get("egressProxyUrl").is_none());
+    }
 
     // ---- §3.5 模型条目补三个字段 ----
 
@@ -1027,7 +1163,7 @@ mod tests {
     #[test]
     fn gateway_keys_cover_everything_modellink_owns() {
         let mut existing = serde_json::json!({});
-        write_gateway_keys(&mut existing, 5678);
+        write_gateway_keys(&mut existing, 5678, &VersionGate::with_version(None));
         assert_eq!(
             existing,
             serde_json::json!({
@@ -1047,7 +1183,7 @@ mod tests {
     fn stream_idle_timeout_stays_inside_the_schema_range() {
         // app.asar 实测 schema：Un().int().min(300).max(1800).optional()
         let mut existing = serde_json::json!({});
-        write_gateway_keys(&mut existing, 5678);
+        write_gateway_keys(&mut existing, 5678, &VersionGate::with_version(None));
         let v = existing["inferenceStreamIdleTimeoutSec"].as_u64().unwrap();
         assert!((300..=1800).contains(&v), "{v} 越界会被 schema 拒掉");
     }
@@ -1059,7 +1195,7 @@ mod tests {
             "inferenceModels": [{"name": "claude-opus-5"}],
             "chatTabEnabled": false,
         });
-        write_gateway_keys(&mut existing, 5679);
+        write_gateway_keys(&mut existing, 5679, &VersionGate::with_version(None));
         // 用户其它字段原样保留
         assert_eq!(existing["someUserSetting"], 42);
         assert_eq!(existing["inferenceModels"][0]["name"], "claude-opus-5");

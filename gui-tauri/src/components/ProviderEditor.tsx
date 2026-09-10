@@ -24,7 +24,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { testProvider, type ModelEntry, type ModelPricing } from "@/lib/ipc";
+import {
+  probeProvider,
+  testProvider,
+  type ModelEntry,
+  type ModelPricing,
+  type ProbeResponse,
+} from "@/lib/ipc";
 import {
   FAMILY_TIERS,
   MAX_MODELS,
@@ -120,6 +126,84 @@ function PricingPanel({
   );
 }
 
+/** 深度探测结果面板（§5.6）。 */
+function ProbePanel({ data, onClose }: { data: ProbeResponse; onClose: () => void }) {
+  const r = data.report;
+  const Row = ({ label, ok, note }: { label: string; ok: boolean; note?: string }) => (
+    <div className="flex items-center gap-2 py-[3px]">
+      <span className={cn("flex-none text-[10px]", ok ? "text-success" : "text-destructive")}>
+        {ok ? "✓" : "✗"}
+      </span>
+      <span className="flex-1 text-[11px] text-muted-foreground">{label}</span>
+      {note && <span className="mono flex-none text-[10px] text-faint">{note}</span>}
+    </div>
+  );
+
+  return (
+    <div className="rounded-[9px] border bg-background px-3 py-2.5">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[11px] font-semibold text-foreground">
+          探测结果 {r.ok ? "" : "· 未连通"}
+        </span>
+        <button
+          onClick={onClose}
+          className="mono text-[10px] text-faint transition-colors hover:text-muted-foreground"
+        >
+          收起 · {(r.elapsed_ms / 1000).toFixed(1)}s
+        </button>
+      </div>
+
+      {!r.ok ? (
+        <div className="mt-1 text-[11px] text-destructive">{r.message}</div>
+      ) : (
+        <>
+          {data.headlines.length > 0 && (
+            <div className="mt-1.5 flex flex-col gap-1 border-b pb-2">
+              {data.headlines.map((h, i) => (
+                <span key={i} className="text-[11px] leading-[1.5] text-foreground">
+                  {h}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="mt-1.5">
+            <Row label="基础 Messages API" ok={r.ok} />
+            <Row
+              label="拒绝不存在的模型名（不会静默回落）"
+              ok={r.validates_model_name}
+              note={r.validates_model_name ? "" : "会静默回落"}
+            />
+            <Row label="接受 claude-* 槽位名" ok={r.accepts_claude_slot} />
+            <Row
+              label="推理强度 output_config.effort"
+              ok={r.effort_accepted.some(([, v]) => v)}
+              note={r.effort_accepted
+                .filter(([, v]) => v)
+                .map(([k]) => k)
+                .join("/")}
+            />
+            <Row
+              label="原生 thinking 字段"
+              ok={r.thinking_variants.some(([, v]) => v)}
+              note={r.thinking_variants
+                .filter(([, v]) => v)
+                .map(([k]) => k)
+                .join("/")}
+            />
+            <Row
+              label="本次观察到缓存命中"
+              ok={r.prompt_caching}
+              note={r.prompt_caching ? "" : "合成请求未必触发"}
+            />
+            <Row label="1M 上下文 beta 头" ok={r.accepts_1m_beta} />
+            <Row label="GET /v1/models" ok={r.models_endpoint} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** 模型条目的进阶字段（§3.5）：层级别名 + 1M 默认。 */
 function TierPanel({
   entry,
@@ -206,6 +290,8 @@ export function ProviderEditor({ index }: { index: number }) {
   const [testing, setTesting] = useState(false);
   /** 展开费率面板的模型下标（一次只开一个）。 */
   const [pricingOpen, setPricingOpen] = useState<number | null>(null);
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<ProbeResponse | null>(null);
   /** 展开层级面板的模型下标。 */
   const [tierOpen, setTierOpen] = useState<number | null>(null);
 
@@ -224,6 +310,7 @@ export function ProviderEditor({ index }: { index: number }) {
     setShowKey(false);
     setPricingOpen(null);
     setTierOpen(null);
+    setProbe(null);
   }, [index]);
 
   const p = draft?.providers[index];
@@ -252,6 +339,26 @@ export function ProviderEditor({ index }: { index: number }) {
       toast.error("请求失败。");
     }
     setTesting(false);
+  };
+
+  // 深度探测（§5.6）：一次问清这家支持到什么程度
+  const runProbe = async () => {
+    const first = p.models[0]?.name;
+    if (!p.target_url || !p.api_key || !first) {
+      toast.error("请填写 API 地址、密钥和至少一个模型名。");
+      return;
+    }
+    setProbing(true);
+    setProbe(null);
+    try {
+      const r = await probeProvider(p.target_url, p.api_key, first);
+      setProbe(r);
+      setTestedOk(index, r.report.ok);
+      if (!r.report.ok) toast.error(r.report.message);
+    } catch (e) {
+      toast.error(`探测失败：${String(e)}`);
+    }
+    setProbing(false);
   };
 
   const removeProvider = () => {
@@ -307,16 +414,30 @@ export function ProviderEditor({ index }: { index: number }) {
       {/* 模型区标签行 + 测试连接（结果弹 toast） */}
       <div className="flex items-center justify-between">
         <label className={fieldLabelCls}>模型 · 右侧为 Claude 中显示的名称</label>
-        <Button
-          variant="outline"
-          onClick={runTest}
-          disabled={testing}
-          className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
-        >
-          {testing && <Loader2 size={12} className="animate-spin" />}
-          测试连接
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={runProbe}
+            disabled={probing || testing}
+            className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
+            title="逐项探测：推理强度档位、模型名校验、缓存透传、1M beta"
+          >
+            {probing && <Loader2 size={12} className="animate-spin" />}
+            深度探测
+          </Button>
+          <Button
+            variant="outline"
+            onClick={runTest}
+            disabled={testing || probing}
+            className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
+          >
+            {testing && <Loader2 size={12} className="animate-spin" />}
+            测试连接
+          </Button>
+        </div>
       </div>
+
+      {probe && <ProbePanel data={probe} onClose={() => setProbe(null)} />}
 
       {/* 模型行 */}
       {p.models.map((m, mi) => {

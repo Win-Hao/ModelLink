@@ -64,7 +64,14 @@ export type Config = {
   org_instructions?: string;
   /** 在指令前追加槽位映射说明（默认开）。 */
   org_identity_note?: boolean;
+  /** Claude Desktop 出网代理（http/https，不含账号密码）。 */
+  egress_proxy_url?: string;
+  /** PAC 自动配置地址；设了它就压过 egress_proxy_url。 */
+  egress_proxy_pac_url?: string;
 };
+
+/** 检测到的 Claude Desktop 版本 + 因版本过低不可用的键（§3.8）。 */
+export type DesktopInfo = { version: string | null; unavailable: string[] };
 
 export type PricingSyncResult = {
   ok: boolean;
@@ -90,15 +97,36 @@ export type LogEntry = {
 
 export type TestResult = { ok: boolean; message: string };
 
+/** 服务商能力探针结果（§5.6）。 */
+export type ProbeReport = {
+  ok: boolean;
+  message: string;
+  models_endpoint: boolean;
+  upstream_efforts: string[];
+  /** false = 这家会静默回落到默认模型。 */
+  validates_model_name: boolean;
+  accepts_claude_slot: boolean;
+  effort_accepted: [string, boolean][];
+  thinking_variants: [string, boolean][];
+  prompt_caching: boolean;
+  accepts_1m_beta: boolean;
+  elapsed_ms: number;
+};
+
+export type ProbeResponse = { report: ProbeReport; headlines: string[] };
+
 export const guiVersion = () => invoke<string>("gui_version");
 export const getConfig = () => invoke<Config>("get_config");
 export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
 export const configHash = (config: Config) => invoke<string>("config_hash", { config });
 export const testProvider = (targetUrl: string, apiKey: string, model: string) =>
   invoke<TestResult>("test_provider", { targetUrl, apiKey, model });
+export const probeProvider = (targetUrl: string, apiKey: string, model: string) =>
+  invoke<ProbeResponse>("probe_provider", { targetUrl, apiKey, model });
 export const applyToClaude = () => invoke<string>("apply_to_claude");
 export const getLogs = () => invoke<LogEntry[]>("get_logs");
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");
 export const setPort = (port: number) => invoke<ProxyStatus>("set_port", { port });
 export const syncPricing = (force: boolean) =>
   invoke<PricingSyncResult>("sync_pricing", { force });
+export const desktopInfo = () => invoke<DesktopInfo>("desktop_info");

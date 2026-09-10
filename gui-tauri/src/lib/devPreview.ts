@@ -130,6 +130,40 @@ mockIPC(async (cmd, payload) => {
       return null;
     case "proxy_status":
       return { running: !params.has("portdown"), port: store.port ?? 5678 };
+    case "probe_provider": {
+      await sleep(1200);
+      return {
+        report: {
+          ok: true,
+          message: "",
+          models_endpoint: true,
+          upstream_efforts: ["low", "high", "max"],
+          validates_model_name: false,
+          accepts_claude_slot: true,
+          effort_accepted: [
+            ["low", true],
+            ["medium", true],
+            ["high", true],
+            ["xhigh", true],
+            ["max", true],
+          ],
+          thinking_variants: [
+            ["adaptive", true],
+            ["enabled", true],
+            ["disabled", false],
+          ],
+          prompt_caching: true,
+          accepts_1m_beta: true,
+          elapsed_ms: 4200,
+        },
+        headlines: [
+          "⚠ 这家会**静默回落**：请求一个不存在的模型也返回 200，直接给默认模型。",
+          "✓ 五档推理强度全部接受，桌面端选择器可直接用（代理原样透传）。",
+        ],
+      };
+    }
+    case "desktop_info":
+      return { version: "1.46388.3", unavailable: [] };
     case "sync_pricing": {
       await sleep(600);
       return { ok: true, changed: 2, skipped: false, message: "", synced_at: String(Math.floor(Date.now() / 1000)) };

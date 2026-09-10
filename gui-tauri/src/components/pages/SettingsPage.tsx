@@ -13,10 +13,11 @@ import { GITHUB_URL } from "@/lib/constants";
 import {
   DEFAULT_HEARTBEAT_SECS,
   DEFAULT_USD_RATE,
+  KEY_FEATURE_NAMES,
   ORG_INSTRUCTIONS_MAX,
   formatAppliedAt,
 } from "@/lib/presets";
-import { guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
+import { desktopInfo, guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useUpdaterCtx } from "@/lib/updaterContext";
@@ -85,6 +86,24 @@ export function SettingsPage() {
   };
 
   const orgLen = (draft?.org_instructions ?? "").length;
+
+  // §3.9 代理地址校验，与后端 egress_proxy_url_valid 同一套规则
+  const badProxy = (v: string) => {
+    const u = v.trim();
+    if (!u) return false;
+    if (!/^https?:\/\//.test(u)) return true;
+    return (u.split("://")[1] ?? "").split("/")[0].includes("@");
+  };
+  const proxyError =
+    badProxy(draft?.egress_proxy_url ?? "") || badProxy(draft?.egress_proxy_pac_url ?? "")
+      ? "地址无效：需以 http:// 或 https:// 开头，且不能内嵌账号密码"
+      : null;
+  const pacSet = !!(draft?.egress_proxy_pac_url ?? "").trim();
+
+  const desktopQ = useQuery({ queryKey: ["desktop-info"], queryFn: desktopInfo });
+  const unavailable = (desktopQ.data?.unavailable ?? []).map(
+    (k) => KEY_FEATURE_NAMES[k] ?? k,
+  );
 
   // 心跳间隔（本地编辑态，blur/Enter 提交）
   const [hbText, setHbText] = useState("");
@@ -188,6 +207,48 @@ export function SettingsPage() {
                 inputMode="numeric"
                 className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
               />
+            </div>
+          </div>
+
+          {/* 网络代理（2.1-E §3.9）：给挂梯子 / 公司代理的用户 */}
+          <div className="flex flex-col gap-2 border-t px-4 py-3">
+            <div>
+              <div className="text-[13px] font-medium">Claude 出网代理</div>
+              <div className="mt-px text-[11px] text-faint">
+                仅 http:// 或 https://，不支持 SOCKS，也不能内嵌账号密码。127.0.0.1
+                自动绕过，不影响 ModelLink 本地网关。代理不通会直接失败而不是回落直连；改完需重启
+                Claude 生效。
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Input
+                value={draft?.egress_proxy_url ?? ""}
+                onChange={(e) =>
+                  updateDraft((c) => {
+                    c.egress_proxy_url = e.target.value;
+                  })
+                }
+                disabled={!draft || pacSet}
+                placeholder="http://proxy.example.com:8080"
+                className="mono h-[30px] rounded-[9px] border-input bg-input-bg px-[11px] text-xs md:text-xs shadow-none dark:bg-input-bg"
+              />
+              <Input
+                value={draft?.egress_proxy_pac_url ?? ""}
+                onChange={(e) =>
+                  updateDraft((c) => {
+                    c.egress_proxy_pac_url = e.target.value;
+                  })
+                }
+                disabled={!draft}
+                placeholder="PAC 地址（可选，填了就压过上面那条）"
+                className="mono h-[30px] rounded-[9px] border-input bg-input-bg px-[11px] text-xs md:text-xs shadow-none dark:bg-input-bg"
+              />
+              {proxyError && <span className="text-[10.5px] text-destructive">{proxyError}</span>}
+              {pacSet && !proxyError && (
+                <span className="text-[10.5px] text-faint">
+                  已填 PAC，上面的普通代理会被 Claude 忽略
+                </span>
+              )}
             </div>
           </div>
 
@@ -365,6 +426,27 @@ export function SettingsPage() {
               {updater.state.isChecking && <Loader2 size={12} className="animate-spin" />}
               检查更新
             </Button>
+          </div>
+
+          {/* 检测到的 Claude Desktop 版本（2.1-E §3.8） */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">Claude Desktop</div>
+              <div className="mt-px text-[11px] text-faint">
+                {desktopQ.data?.version ? (
+                  <>
+                    检测到 <span className="mono">{desktopQ.data.version}</span>
+                    {unavailable.length > 0 ? (
+                      <> · 版本过低，暂不可用：{unavailable.join("、")}</>
+                    ) : (
+                      <> · 全部能力可用</>
+                    )}
+                  </>
+                ) : (
+                  "未检测到安装（写入时不做版本裁剪）"
+                )}
+              </div>
+            </div>
           </div>
 
           {/* 关于 */}

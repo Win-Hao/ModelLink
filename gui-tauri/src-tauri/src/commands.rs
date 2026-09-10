@@ -8,6 +8,7 @@ use tauri::State;
 
 use crate::config::{canonical_hash, save_config_file, Config};
 use crate::gateway;
+use crate::models_dev;
 use crate::proxy::{LogEntry, ProxyState};
 
 /// GUI 自身版本号（供前端设置页显示）。
@@ -29,7 +30,11 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         let cur = state.config.read().unwrap_or_else(|e| e.into_inner());
         config.last_applied_hash = cur.last_applied_hash.clone();
         config.last_applied_at = cur.last_applied_at.clone();
+        config.last_applied_pool = cur.last_applied_pool.clone();
         config.port = cur.port;
+        config.pricing_synced_at = cur.pricing_synced_at.clone();
+        // 后台同步可能刚写完，而前端手上这份草稿是同步前的 —— 别让它抹掉同步结果
+        models_dev::preserve_synced_pricing(&mut config, &cur);
     }
     save_config_file(&config)?;
     *state.config.write().unwrap_or_else(|e| e.into_inner()) = config;
@@ -138,6 +143,7 @@ pub async fn apply_to_claude(state: State<'_, Arc<ProxyState>>) -> Result<String
 
     // design.md §8：apply 成功后持久化 last_applied_hash（写盘失败不回滚 apply，仅打日志）
     config.last_applied_hash = canonical_hash(&config);
+    config.last_applied_pool = crate::config::SLOT_POOL_VERSION.to_string();
     config.last_applied_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
@@ -149,6 +155,74 @@ pub async fn apply_to_claude(state: State<'_, Arc<ProxyState>>) -> Result<String
 
     gateway::restart_claude_desktop();
     Ok("Applied! Claude Desktop is restarting...".to_string())
+}
+
+#[derive(Serialize)]
+pub struct PricingSyncResult {
+    pub ok: bool,
+    /// 费率发生变化的模型条数（0 = 已是最新）。
+    pub changed: usize,
+    /// 因「关了自动同步」或「距上次不足 6 小时」而没真拉。
+    pub skipped: bool,
+    pub message: String,
+    pub synced_at: String,
+}
+
+/// 从 models.dev 同步费率（§3.1）。`force` = 用户手点，无视开关与 6 小时阈值。
+///
+/// 失败不影响任何既有配置：拉不到就保持上次同步的值（降级到「价格略旧」而不是「没有价格」）。
+#[tauri::command]
+pub async fn sync_pricing(
+    state: State<'_, Arc<ProxyState>>,
+    force: bool,
+) -> Result<PricingSyncResult, String> {
+    let (auto, synced_at) = {
+        let c = state.config.read().unwrap_or_else(|e| e.into_inner());
+        (c.pricing_auto_sync, c.pricing_synced_at.clone())
+    };
+    let now = models_dev::now_secs();
+    if !force && (!auto || !models_dev::is_stale(&synced_at, now)) {
+        return Ok(PricingSyncResult {
+            ok: true,
+            changed: 0,
+            skipped: true,
+            message: String::new(),
+            synced_at,
+        });
+    }
+
+    // 网络往返期间不持锁 —— 拿到 catalog 再回来落盘
+    let catalog = match models_dev::fetch_catalog(&state.client).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[pricing] 同步失败: {}", e);
+            return Ok(PricingSyncResult {
+                ok: false,
+                changed: 0,
+                skipped: false,
+                message: e,
+                synced_at,
+            });
+        }
+    };
+
+    let (changed, config) = {
+        let mut cur = state.config.write().unwrap_or_else(|e| e.into_inner());
+        let changed = models_dev::apply_catalog(&mut cur, &catalog);
+        cur.pricing_synced_at = now.to_string();
+        (changed, cur.clone())
+    };
+    if let Err(e) = save_config_file(&config) {
+        eprintln!("[pricing] WARN: 同步结果落盘失败: {}", e);
+    }
+    eprintln!("[pricing] 同步完成：{} 家服务商，{} 个模型费率有变化", catalog.len(), changed);
+    Ok(PricingSyncResult {
+        ok: true,
+        changed,
+        skipped: false,
+        message: String::new(),
+        synced_at: now.to_string(),
+    })
 }
 
 #[tauri::command]

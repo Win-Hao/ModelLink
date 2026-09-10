@@ -9,6 +9,9 @@
 # 2.1-A 起「与 v1 逐字节等价」不再是全量目标：DIVERGE 表里的用例是**有意**不等价的
 # 行为改动，对它们改为断言新行为（见下方 python 段）。表外的用例仍须逐字节一致。
 #
+# 2.1-B 起槽位池换成了 claude-opus-5 等（§2.1），所以 /v1/models 与网关 inferenceModels
+# 里的槽位名与 v1 必然不同 —— 比对时按顺序对齐，只校验「第 n 个槽位映射到第 n 个模型」。
+#
 # 用法：OLD_BIN=<v1 可执行> NEW_BIN=<v2 可执行> bash regression/run.sh
 #   v1 二进制取自仓库根 ModelLink-macOS.zip（或 GitHub v1.2.0 release）：
 #     unzip -o ModelLink-macOS.zip -d /tmp/mlv1 && xattr -cr /tmp/mlv1
@@ -46,7 +49,14 @@ run_one() { # $1=label $2=binary $3=home
   sleep 0.5
   HOME="$home" "$bin" >/dev/null 2>"$EQ/app-$label.log" & local app=$!
   wait_port
-  bash "$HERE/drive.sh" "$EQ/out-$label" >/dev/null
+  if [ "$label" = "old" ]; then
+    # v1 认的是 2.0 的 legacy 槽位池
+    SLOT0=claude-3-opus-latest SLOT1=claude-3-5-sonnet-latest \
+    SLOT2=claude-3-sonnet-20240229 SLOT3=claude-3-haiku-20240307 \
+      bash "$HERE/drive.sh" "$EQ/out-$label" >/dev/null
+  else
+    bash "$HERE/drive.sh" "$EQ/out-$label" >/dev/null
+  fi
   kill "$app" 2>/dev/null; wait "$app" 2>/dev/null || true
   kill "$up" 2>/dev/null; wait "$up" 2>/dev/null || true
   sleep 0.5
@@ -188,8 +198,28 @@ if [ "$(cat "$EQ/out-old/rectify.status")" = "400" ]; then
 else
   echo "✗ 对照失败：v1 的 rectify.status = $(cat "$EQ/out-old/rectify.status")"; fail=1
 fi
-echo "=== DIFF /v1/models ==="
-if diff "$EQ/out-old/models.json" "$EQ/out-new/models.json"; then echo "✓ /v1/models 一致"; else fail=1; fi
+echo "=== /v1/models（2.1-B 槽位池已换，比对映射顺序而非槽位名） ==="
+if python3 - "$EQ" <<'PY'
+import json, sys, pathlib
+eq = pathlib.Path(sys.argv[1])
+POOL = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7",
+        "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"]
+o = json.load(open(eq / "out-old" / "models.json"))["data"]
+n = json.load(open(eq / "out-new" / "models.json"))["data"]
+fails = 0
+if [m["display_name"] for m in o] != [m["display_name"] for m in n]:
+    print("✗ 模型映射顺序与 v1 不一致"); fails += 1
+else:
+    print(f"✓ 模型映射顺序与 v1 一致（{len(n)} 条）")
+for m in n:
+    slot = m["id"].removesuffix("[1m]")
+    if slot not in POOL and not slot.startswith("claude-ml-"):
+        print(f"✗ 槽位 {slot} 不在 2.1 槽位池里"); fails += 1
+if not fails:
+    print("✓ 槽位全部来自 2.1 新池子")
+sys.exit(1 if fails else 0)
+PY
+then :; else fail=1; fi
 echo "=== DIFF 响应（状态码/透传体/404/502 话术） ==="
 for f in r1.status r1.body notfound.status notfound.body nomodel.status nomodel.body; do
   if diff "$EQ/out-old/$f" "$EQ/out-new/$f" >/dev/null; then echo "✓ $f"; else echo "✗ $f"; fail=1; fi
@@ -204,6 +234,11 @@ fails = 0
 # 新版比 v1 多写的键 —— 剔除后其余必须逐字节一致
 # labelOverride: 2026-07-14 拍板例外；后两个: 2.1-A §3.4
 ADDED_KEYS = {"chatTabEnabled": True, "disableDeploymentModeChooser": True}
+# 2.1-B §3.1：费率两键只在「应用」时写（那时才有模型与费率），
+# 启动自动配置阶段有意不碰 —— 否则每次重启都会把用户刚应用好的费率表清掉。
+PRICING_KEYS_MUST_BE_ABSENT = ["inferenceModelPricingEnabled", "inferenceModelPricing"]
+POOL = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7",
+        "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"]
 
 cases = [
     ("configLibrary/a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4.json", True),
@@ -222,6 +257,17 @@ for rel, is_gateway in cases:
                 print(f"✗ {rel}: 缺 {k}={want}（§3.4）"); fails += 1
             elif k in o:
                 print(f"✗ {rel}: v1 竟然也写了 {k}?"); fails += 1
+        # 2.1-B 槽位池：inferenceModels 的 name 与 v1 必然不同，按顺序对齐后比对
+        for side in (o, n):
+            side.setdefault("inferenceModels", [])
+        if len(o["inferenceModels"]) == len(n["inferenceModels"]):
+            for m in n["inferenceModels"]:
+                if m.get("name") not in POOL and not str(m.get("name")).startswith("claude-ml-"):
+                    print(f"✗ {rel}: 槽位 {m.get('name')} 不在 2.1 槽位池里"); fails += 1
+            o["inferenceModels"] = n["inferenceModels"] = "<按顺序对齐后忽略槽位名>"
+        for k in PRICING_KEYS_MUST_BE_ABSENT:
+            if k in n:
+                print(f"✗ {rel}: 启动自动配置不该写 {k}（会清掉已应用的费率表）"); fails += 1
         # v1 从不写这两个键 → 用户装完 Chat 页是关的，这正是 §3.4 要修的
     if o == n:
         print(f"✓ {rel}" + ("（剔除新增键后与 v1 一致）" if is_gateway else ""))

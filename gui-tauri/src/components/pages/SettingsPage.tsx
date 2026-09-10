@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import { guiVersion, proxyStatus } from "@/lib/ipc";
+import { DEFAULT_USD_RATE, formatAppliedAt } from "@/lib/presets";
+import { guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useUpdaterCtx } from "@/lib/updaterContext";
@@ -24,7 +25,7 @@ const THEME_TABS: { value: ThemePref; label: string }[] = [
 /** 设置页（design.md §6.4）：外观 / 代理端口 / 兼容模式 / 开机自启 / 软件更新 / 关于。 */
 export function SettingsPage() {
   const { pref, setPref } = useTheme();
-  const { changePort, draft, updateDraft } = useAppStore();
+  const { changePort, draft, updateDraft, reloadConfig } = useAppStore();
   const updater = useUpdaterCtx();
   const qc = useQueryClient();
 
@@ -59,6 +60,39 @@ export function SettingsPage() {
       setPortText(cur ? String(cur) : "");
     }
     setSwitching(false);
+  };
+
+  // 汇率输入（本地编辑态，blur/Enter 提交；非法值回滚到当前值）
+  const [rateText, setRateText] = useState("");
+  useEffect(() => {
+    if (draft) setRateText(String(draft.usd_rate ?? DEFAULT_USD_RATE));
+  }, [draft?.usd_rate]);
+
+  const submitRate = () => {
+    const cur = draft?.usd_rate ?? DEFAULT_USD_RATE;
+    const n = Number(rateText);
+    if (!rateText || !Number.isFinite(n) || n <= 0) {
+      toast.error("汇率需大于 0");
+      setRateText(String(cur));
+      return;
+    }
+    if (n !== cur) updateDraft((c) => (c.usd_rate = n));
+  };
+
+  // 手动同步费率：无视自动开关与 6 小时阈值
+  const [syncing, setSyncing] = useState(false);
+  const runSync = async () => {
+    setSyncing(true);
+    try {
+      const r = await syncPricing(true);
+      if (!r.ok) toast.error(`费率同步失败：${r.message}`);
+      else if (r.changed > 0) toast.success(`费率已更新：${r.changed} 个模型`);
+      else toast.success("费率已是最新");
+      await reloadConfig();
+    } catch (e) {
+      toast.error(`费率同步失败：${String(e)}`);
+    }
+    setSyncing(false);
   };
 
   const toggleAutostart = async (ck: boolean) => {
@@ -130,6 +164,62 @@ export function SettingsPage() {
                 className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
               />
             </div>
+          </div>
+
+          {/* 费率同步（2.1-B §3.1）：数据源 models.dev，社区维护的开源模型数据库 */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">自动同步模型费率</div>
+              <div className="mt-px text-[11px] text-faint">
+                启动时从 models.dev 拉取官方价（最多 6 小时一次）·{" "}
+                {draft?.pricing_synced_at
+                  ? `上次同步 ${formatAppliedAt(draft.pricing_synced_at) ?? "—"}`
+                  : "尚未同步"}
+                <br />
+                手填的费率不会被覆盖
+              </div>
+            </div>
+            <div className="flex flex-none items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => void runSync()}
+                disabled={syncing}
+                className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
+              >
+                {syncing && <Loader2 size={12} className="animate-spin" />}
+                立即同步
+              </Button>
+              <Switch
+                checked={draft?.pricing_auto_sync ?? true}
+                disabled={!draft}
+                onCheckedChange={(ck) =>
+                  updateDraft((c) => {
+                    c.pricing_auto_sync = ck;
+                  })
+                }
+              />
+            </div>
+          </div>
+
+          {/* 人民币兑美元汇率（2.1-B §五①）：费率表单位写死 USD，换算必须可见可改 */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">人民币兑美元汇率</div>
+              <div className="mt-px text-[11px] text-faint">
+                模型费率按人民币填写，写入 Claude Desktop 时除以该汇率换算成美元
+              </div>
+            </div>
+            <Input
+              value={rateText}
+              onChange={(e) => setRateText(e.target.value.replace(/[^0-9.]/g, ""))}
+              onBlur={submitRate}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+              disabled={!draft}
+              inputMode="decimal"
+              className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
+            />
           </div>
 
           {/* 兼容模式（2.1-A §3.3）：给依赖旧版静默回落行为的用户留的台阶 */}

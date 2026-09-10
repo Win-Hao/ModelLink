@@ -577,8 +577,8 @@ mod tests {
                 target_url: "https://a.example.com".into(),
                 api_key: "k".into(),
                 models: vec![
-                    ModelEntry { name: "m-with-1m".into(), to_1m: "auto".into() },
-                    ModelEntry { name: "m-plain".into(), to_1m: "".into() },
+                    ModelEntry { name: "m-with-1m".into(), to_1m: "auto".into(), ..Default::default() },
+                    ModelEntry { name: "m-plain".into(), to_1m: "".into(), ..Default::default() },
                 ],
                 thinking_effort: te.into(),
             }],
@@ -593,12 +593,12 @@ mod tests {
         let v = models_json(&cfg_one(""));
         let data = v.get("data").unwrap().as_array().unwrap();
         assert_eq!(data.len(), 3); // slot1 + slot1[1m] + slot2
-        assert_eq!(data[0]["id"], "claude-3-opus-latest");
+        assert_eq!(data[0]["id"], "claude-opus-5");
         assert_eq!(data[0]["display_name"], "m-with-1m");
         assert_eq!(data[0]["created"], 0);
-        assert_eq!(data[1]["id"], "claude-3-opus-latest[1m]");
+        assert_eq!(data[1]["id"], "claude-opus-5[1m]");
         assert_eq!(data[1]["display_name"], "m-with-1m (1M)");
-        assert_eq!(data[2]["id"], "claude-3-5-sonnet-latest");
+        assert_eq!(data[2]["id"], "claude-sonnet-5");
         assert_eq!(data[2]["display_name"], "m-plain");
     }
 

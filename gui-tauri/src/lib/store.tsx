@@ -19,7 +19,7 @@ import {
   type Config,
   type Provider,
 } from "@/lib/ipc";
-import { PRESETS, type Preset } from "@/lib/presets";
+import { PRESETS, SLOT_POOL_VERSION, type Preset } from "@/lib/presets";
 
 // ============================================================
 // 全局应用状态：配置草稿 + 自动保存(400ms) + 应用状态机 + 页面导航。
@@ -58,6 +58,13 @@ type Store = {
   resetTested: () => void;
   /** 端口热切换：成功后同步草稿 port + 刷新状态 + dirty 重算。 */
   changePort: (port: number) => Promise<void>;
+  /** 从后端重新读配置覆盖草稿（费率同步等「后端专管」字段变化后调用）。 */
+  reloadConfig: () => Promise<void>;
+  /**
+   * dirty 是「升级换了槽位池」造成的，而非用户改了配置（§2.2）。
+   * 老用户升级后 Claude Desktop 里写的还是旧槽位，不重新应用就用不上原生推理强度选择器。
+   */
+  poolUpgrade: boolean;
 };
 
 const Ctx = createContext<Store | null>(null);
@@ -211,6 +218,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     [flushSave, qc],
   );
 
+  // 应用过（有 hash）但记的是旧池代号 → 这次 dirty 是升级带来的
+  const poolUpgrade =
+    !!draft?.last_applied_hash && (draft.last_applied_pool ?? "") !== SLOT_POOL_VERSION;
+
+  const reloadConfig = useCallback(async () => {
+    const fresh = await getConfig();
+    qc.setQueryData(["config"], fresh);
+    setDraft(structuredClone(fresh));
+    const h = await configHash(fresh);
+    setDirty(fresh.providers.length > 0 && h !== (fresh.last_applied_hash ?? ""));
+  }, [qc]);
+
   const applyState: ApplyState = applying
     ? "applying"
     : applyError
@@ -239,6 +258,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         setTestedOk,
         resetTested,
         changePort,
+        reloadConfig,
+        poolUpgrade,
       }}
     >
       {children}

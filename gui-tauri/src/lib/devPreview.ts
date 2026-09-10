@@ -130,6 +130,10 @@ mockIPC(async (cmd, payload) => {
       return null;
     case "proxy_status":
       return { running: !params.has("portdown"), port: store.port ?? 5678 };
+    case "sync_pricing": {
+      await sleep(600);
+      return { ok: true, changed: 2, skipped: false, message: "", synced_at: String(Math.floor(Date.now() / 1000)) };
+    }
     case "set_port": {
       await sleep(400);
       store.port = args.port as number;

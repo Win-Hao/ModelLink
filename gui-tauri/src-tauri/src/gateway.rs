@@ -249,6 +249,58 @@ fn inference_models_entries(flat: &[crate::config::FlatEntry]) -> Vec<serde_json
         .collect()
 }
 
+/// 单个价格字段的 schema 值域（app.asar 实测：`O().min(0).max(1e4)`）。
+/// 越界的一行会让整张费率表失效，所以宁可钳住。
+const PRICE_MAX: f64 = 10_000.0;
+
+/// 费率覆盖行（§3.1）。每个定了价的槽位一行，`name` = 槽位 ID（不是上游真名）。
+///
+/// ⚠️ 单位固定 USD/百万 token，且 `inputPerMtok` / `outputPerMtok` /
+/// `cacheReadPerMtok` / `cacheWritePerMtok` **四个全是必填**（设计文档 §3.1 写的
+/// 「全部可选」与 app.asar 里的 schema 不符，以 schema 为准）。因此：
+/// - 缓存价没填按 0 计 —— 多数国产服务商不单独收缓存写入费，models.dev 也是不收才不写；
+/// - 输入 / 输出价没填就整行不写 —— 那两个数编不得，宁可这个模型不显示费用。
+fn inference_model_pricing_entries(
+    flat: &[crate::config::FlatEntry],
+    usd_rate: f64,
+) -> Vec<serde_json::Value> {
+    let clamp = |v: f64| v.clamp(0.0, PRICE_MAX);
+    let mut out = Vec::new();
+    for e in flat {
+        let Some(p) = e.pricing.as_ref().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let p = p.in_usd(usd_rate);
+        let (Some(input), Some(output)) = (p.input, p.output) else {
+            eprintln!("[pricing] {} 缺输入/输出价，跳过该行", e.slot);
+            continue;
+        };
+        out.push(serde_json::json!({
+            "name": e.slot,
+            "inputPerMtok": clamp(input),
+            "outputPerMtok": clamp(output),
+            "cacheReadPerMtok": clamp(p.cache_read.unwrap_or(0.0)),
+            "cacheWritePerMtok": clamp(p.cache_write.unwrap_or(0.0)),
+        }));
+    }
+    out
+}
+
+/// 写费率两键。⚠️ 一条费率都没填时 `inferenceModelPricingEnabled` 必须为 **false**：
+/// 槽位借用的是真实 Claude 型号名，费率注解写明内置 Claude ID 也覆盖其带日期/服务商
+/// 的形态 —— 没有覆盖行时引擎会按 Anthropic 官方价估算，那是假账单。宁可不显示费用。
+///
+/// （`inferenceModelPricing*` 1.37937.0 起支持；按版本门槛跳过写入属于 §3.8，排在 E 批。）
+fn write_pricing_keys(
+    existing: &mut serde_json::Value,
+    flat: &[crate::config::FlatEntry],
+    usd_rate: f64,
+) {
+    let rows = inference_model_pricing_entries(flat, usd_rate);
+    existing["inferenceModelPricingEnabled"] = serde_json::json!(!rows.is_empty());
+    existing["inferenceModelPricing"] = serde_json::json!(rows);
+}
+
 pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
     if config.providers.is_empty() {
         return Err("Please add at least one provider.".to_string());
@@ -313,6 +365,7 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
 
     write_gateway_keys(&mut existing, config.port);
     existing["inferenceModels"] = serde_json::json!(models);
+    write_pricing_keys(&mut existing, &flat, config.usd_rate);
 
     let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
     write_with_retry(&config_file, &data)?;
@@ -504,7 +557,212 @@ pub fn restart_claude_desktop() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{flatten_config, ModelEntry, Provider};
+    use crate::config::{flatten_config, ModelEntry, ModelPricing, Provider};
+
+    // ---- §3.1 费率表 ----
+
+    fn priced(name: &str, input: f64, output: f64) -> ModelEntry {
+        ModelEntry {
+            name: name.into(),
+            to_1m: String::new(),
+            pricing: Some(ModelPricing {
+                input: Some(input),
+                output: Some(output),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn cfg_with(models: Vec<ModelEntry>) -> Config {
+        Config {
+            providers: vec![Provider {
+                target_url: "https://a.example.com".into(),
+                api_key: "k".into(),
+                models,
+                thinking_effort: String::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pricing_entries_are_keyed_by_slot_and_converted_to_usd() {
+        let cfg = cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]);
+        let entries = inference_model_pricing_entries(&flatten_config(&cfg), cfg.usd_rate);
+        assert_eq!(
+            entries,
+            vec![serde_json::json!({
+                // name = 槽位 ID，不是上游真名 —— 引擎按这个匹配用量
+                "name": "claude-opus-5",
+                "inputPerMtok": 0.5556,
+                "outputPerMtok": 2.2222,
+                "cacheReadPerMtok": 0.0,
+                "cacheWritePerMtok": 0.0,
+            })]
+        );
+    }
+
+    #[test]
+    fn pricing_rows_always_carry_all_four_fields() {
+        // app.asar 实测：四个价格字段的 schema 是 O().min(0).max(1e4)，**没有 .optional()**
+        // ——「四个字段全部可选」是设计文档写错了。缺字段的行会被 schema 拒掉，
+        // 而一行不合法很可能让整张费率表（甚至整个配置文件）失效。
+        let cfg = cfg_with(vec![priced("m", 4.0, 16.0)]);
+        let rows = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        let row = rows[0].as_object().unwrap();
+        for k in [
+            "name",
+            "inputPerMtok",
+            "outputPerMtok",
+            "cacheReadPerMtok",
+            "cacheWritePerMtok",
+        ] {
+            assert!(row.contains_key(k), "缺字段 {k}: {row:?}");
+        }
+        // 没填的缓存价按 0 计（多数国产服务商不单独收缓存写入费）
+        assert_eq!(row["cacheReadPerMtok"], 0.0);
+        assert_eq!(row["cacheWritePerMtok"], 0.0);
+    }
+
+    #[test]
+    fn models_without_input_or_output_price_get_no_row_at_all() {
+        // 缓存价可以按 0 兜底，输入/输出价不能编 —— 没有就不写这一行
+        let cfg = cfg_with(vec![
+            ModelEntry {
+                name: "only-cache".into(),
+                pricing: Some(ModelPricing { cache_read: Some(0.8), ..Default::default() }),
+                ..Default::default()
+            },
+            ModelEntry {
+                name: "only-input".into(),
+                pricing: Some(ModelPricing { input: Some(4.0), ..Default::default() }),
+                ..Default::default()
+            },
+        ]);
+        assert!(inference_model_pricing_entries(&flatten_config(&cfg), 7.2).is_empty());
+    }
+
+    #[test]
+    fn prices_are_clamped_into_the_schema_range() {
+        // schema 值域 [0, 10000]；越界的一行会让整张表失效，宁可钳住
+        let cfg = cfg_with(vec![ModelEntry {
+            name: "m".into(),
+            pricing: Some(ModelPricing {
+                input: Some(999_999.0),
+                output: Some(-5.0),
+                cache_read: Some(0.0),
+                cache_write: Some(0.0),
+                currency: "USD".into(),
+            }),
+            ..Default::default()
+        }]);
+        let rows = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        assert_eq!(rows[0]["inputPerMtok"], 10000.0);
+        assert_eq!(rows[0]["outputPerMtok"], 0.0);
+    }
+
+    #[test]
+    fn unpriced_models_get_no_row_and_keep_their_slot_position() {
+        let cfg = cfg_with(vec![
+            ModelEntry { name: "no-price".into(), ..Default::default() },
+            ModelEntry {
+                name: "full".into(),
+                to_1m: String::new(),
+                pricing: Some(ModelPricing {
+                    input: Some(4.0),
+                    output: Some(16.0),
+                    cache_read: Some(0.8),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ModelEntry {
+                name: "empty-price".into(),
+                to_1m: String::new(),
+                pricing: Some(ModelPricing::default()),
+                ..Default::default()
+            },
+        ]);
+        let entries = inference_model_pricing_entries(&flatten_config(&cfg), 7.2);
+        // 只有 full 那条成行；它占的是第 2 个槽位（没定价的模型照样占槽位）
+        assert_eq!(
+            entries,
+            vec![serde_json::json!({
+                "name": "claude-sonnet-5",
+                "inputPerMtok": 0.5556,
+                "outputPerMtok": 2.2222,
+                "cacheReadPerMtok": 0.1111,
+                "cacheWritePerMtok": 0.0,
+            })]
+        );
+    }
+
+    #[test]
+    fn pricing_switch_stays_off_when_nothing_is_priced() {
+        // 一条费率都没填时开着 enabled，引擎会拿 Anthropic 官方价估算借来的槽位名 ——
+        // 那就是假账单。宁可不显示费用。
+        let mut existing = serde_json::json!({});
+        let cfg = cfg_with(vec![ModelEntry { name: "m".into(), ..Default::default() }]);
+        write_pricing_keys(&mut existing, &flatten_config(&cfg), cfg.usd_rate);
+        assert_eq!(existing["inferenceModelPricingEnabled"], false);
+        assert_eq!(existing["inferenceModelPricing"], serde_json::json!([]));
+
+        let cfg = cfg_with(vec![priced("m", 4.0, 16.0)]);
+        write_pricing_keys(&mut existing, &flatten_config(&cfg), cfg.usd_rate);
+        assert_eq!(existing["inferenceModelPricingEnabled"], true);
+        assert_eq!(existing["inferenceModelPricing"].as_array().unwrap().len(), 1);
+    }
+
+    /// 端到端：整条 apply 写入路径（含费率行）落到磁盘上长什么样。
+    /// 改 HOME 会影响整个进程，故串行执行：`cargo test -- --ignored --test-threads=1`。
+    #[test]
+    #[ignore = "改 HOME，需串行运行"]
+    fn apply_writes_a_schema_valid_pricing_table() {
+        let tmp = std::env::temp_dir().join(format!("ml-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+
+        let mut cfg = cfg_with(vec![
+            priced("Kimi-k2.6", 4.0, 16.0),
+            ModelEntry { name: "no-price".into(), ..Default::default() },
+        ]);
+        cfg.providers[0].target_url = "https://api.kimi.com/coding/".into();
+        apply_to_claude_desktop(&cfg).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                claude_3p_dir()
+                    .unwrap()
+                    .join("configLibrary/a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // 槽位来自 2.1 新池子
+        let models = written["inferenceModels"].as_array().unwrap();
+        assert_eq!(models[0]["name"], "claude-opus-5");
+        assert_eq!(models[1]["name"], "claude-sonnet-5");
+
+        // 费率：定了价的成行，四字段齐全且都在 schema 值域内；没定价的不出现
+        assert_eq!(written["inferenceModelPricingEnabled"], true);
+        let rows = written["inferenceModelPricing"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "no-price 那条不该有费率行");
+        assert_eq!(rows[0]["name"], "claude-opus-5");
+        for k in ["inputPerMtok", "outputPerMtok", "cacheReadPerMtok", "cacheWritePerMtok"] {
+            let v = rows[0][k].as_f64().unwrap_or_else(|| panic!("{k} 缺失或不是数字"));
+            assert!((0.0..=PRICE_MAX).contains(&v), "{k}={v} 越界");
+        }
+        assert_eq!(rows[0]["inputPerMtok"], 0.5556);
+
+        // §3.4 两个键 + 用户其它字段不受影响
+        assert_eq!(written["chatTabEnabled"], true);
+        assert_eq!(written["disableDeploymentModeChooser"], true);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// §3.4：这七个键就是 ModelLink 写进网关配置的全部内容 —— 少一个都有用户可见的
     /// 后果（chatTabEnabled 不写 = Chat 页是关的）。改这张表要同步 docs。
@@ -530,13 +788,13 @@ mod tests {
     fn gateway_keys_preserve_other_user_fields() {
         let mut existing = serde_json::json!({
             "someUserSetting": 42,
-            "inferenceModels": [{"name": "claude-3-opus-latest"}],
+            "inferenceModels": [{"name": "claude-opus-5"}],
             "chatTabEnabled": false,
         });
         write_gateway_keys(&mut existing, 5679);
         // 用户其它字段原样保留
         assert_eq!(existing["someUserSetting"], 42);
-        assert_eq!(existing["inferenceModels"][0]["name"], "claude-3-opus-latest");
+        assert_eq!(existing["inferenceModels"][0]["name"], "claude-opus-5");
         // 自己负责的键覆盖为新值
         assert_eq!(existing["chatTabEnabled"], true);
         assert_eq!(existing["inferenceGatewayBaseUrl"], "http://127.0.0.1:5679");
@@ -549,8 +807,8 @@ mod tests {
                 target_url: "https://a.example.com".into(),
                 api_key: "k".into(),
                 models: vec![
-                    ModelEntry { name: "Kimi-k2.6".into(), to_1m: "auto".into() },
-                    ModelEntry { name: "mimo-v2.5-pro".into(), to_1m: "".into() },
+                    ModelEntry { name: "Kimi-k2.6".into(), to_1m: "auto".into(), ..Default::default() },
+                    ModelEntry { name: "mimo-v2.5-pro".into(), to_1m: "".into(), ..Default::default() },
                 ],
                 thinking_effort: String::new(),
             }],
@@ -560,7 +818,7 @@ mod tests {
         assert_eq!(
             entries[0],
             serde_json::json!({
-                "name": "claude-3-opus-latest",
+                "name": "claude-opus-5",
                 "supports1m": true,
                 "labelOverride": "Kimi-k2.6"
             })
@@ -568,7 +826,7 @@ mod tests {
         assert_eq!(
             entries[1],
             serde_json::json!({
-                "name": "claude-3-5-sonnet-latest",
+                "name": "claude-sonnet-5",
                 "supports1m": false,
                 "labelOverride": "mimo-v2.5-pro"
             })

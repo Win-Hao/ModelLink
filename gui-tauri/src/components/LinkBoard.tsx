@@ -28,7 +28,9 @@ export function LinkBoard() {
     <div className="rounded-xl border bg-card">
       <div className="flex items-baseline justify-between px-4 pt-[13px]">
         <span className="text-[11px] font-semibold tracking-[.08em] text-faint">模型链路</span>
-        <span className="mono text-[11px] text-faint">{flat.length} / 8 槽位</span>
+        <span className="mono text-[11px] text-faint">
+          {flat.length} / {MAX_MODELS} 槽位
+        </span>
       </div>
       <div className="flex flex-col px-2 pb-2.5 pt-1.5">
         {!draft && (
@@ -62,8 +64,24 @@ export function LinkBoard() {
                 i > 0 && "border-t",
               )}
             >
-              <span className="mono w-[212px] flex-none truncate text-[11.5px] text-muted-foreground">
+              <span className="mono w-[150px] flex-none truncate text-[11.5px] text-muted-foreground">
                 {e.slot}
+              </span>
+              {/* §2.1：槽位决定 Claude Desktop 里出不出现推理强度选择器 */}
+              <span
+                className={cn(
+                  "flex w-[58px] flex-none justify-center rounded-[4px] border px-1 py-px text-[9px] font-medium",
+                  e.efforts.length > 0
+                    ? "border-success/30 text-success"
+                    : "border-border text-faint",
+                )}
+                title={
+                  e.efforts.length > 0
+                    ? `Claude 里可选 ${e.efforts.join(" / ")}`
+                    : "该槽位在 Claude 里没有推理强度选择器"
+                }
+              >
+                {e.efforts.length > 0 ? `${e.efforts.length} 档强度` : "无强度"}
               </span>
               <ArrowRight size={13} className="flex-none text-faint" />
               <span className="flex min-w-0 flex-1 items-center gap-[7px]">

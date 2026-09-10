@@ -6,10 +6,24 @@ import { invoke } from "@tauri-apps/api/core";
 // 注意：Config 内部字段是 serde 原名（snake_case，兼容红线 #2）。
 // ============================================================
 
+/** 单个模型的费率（§3.1），单位「每百万 token」。四个字段全部可选。 */
+export type ModelPricing = {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+  /** ""（默认）= 人民币，写入时按汇率换算；"USD" = 原样写入。 */
+  currency?: string;
+};
+
 export type ModelEntry = {
   name: string;
   /** 非空（v1 里为 "auto"）表示该模型开启 1M 上下文变体。 */
   to_1m: string;
+  /** 用户手填的费率；有内容时完全接管，不与同步值合并。 */
+  pricing?: ModelPricing;
+  /** 从 models.dev 同步来的费率（USD/百万 token），后端专管，界面只读。 */
+  pricing_synced?: ModelPricing;
 };
 
 export type Provider = {
@@ -30,6 +44,22 @@ export type Config = {
   port?: number;
   /** 兼容模式：未映射的槽位回落到第一个模型（v1 静默行为），默认关。 */
   compat_fallback?: boolean;
+  /** 上次「应用」时用的槽位池代号；与当前不符 = 升级后还没重新应用。 */
+  last_applied_pool?: string;
+  /** 人民币兑美元汇率（§五①，默认 7.2）；费率写入网关时按它换算。 */
+  usd_rate?: number;
+  /** 启动时自动从 models.dev 同步费率（6 小时阈值），默认开。 */
+  pricing_auto_sync?: boolean;
+  /** 上次成功同步时间（Unix 秒字符串）。 */
+  pricing_synced_at?: string;
+};
+
+export type PricingSyncResult = {
+  ok: boolean;
+  changed: number;
+  skipped: boolean;
+  message: string;
+  synced_at: string;
 };
 
 export type ProxyStatus = { running: boolean; port: number };
@@ -58,3 +88,5 @@ export const applyToClaude = () => invoke<string>("apply_to_claude");
 export const getLogs = () => invoke<LogEntry[]>("get_logs");
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");
 export const setPort = (port: number) => invoke<ProxyStatus>("set_port", { port });
+export const syncPricing = (force: boolean) =>
+  invoke<PricingSyncResult>("sync_pricing", { force });

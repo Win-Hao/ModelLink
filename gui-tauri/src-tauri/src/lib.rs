@@ -12,6 +12,7 @@ use tauri::{
 mod commands;
 mod config;
 mod gateway;
+mod models_dev;
 mod proxy;
 
 use proxy::ProxyState;
@@ -91,6 +92,42 @@ pub fn run() {
                 }
             }
 
+            // 费率自动同步（§3.1）：后台跑，拉不到就静默保持旧值，绝不拖慢启动
+            {
+                let st = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 先判要不要同步 —— api.json 有 4.5 MB，不到 6 小时阈值就别下
+                    {
+                        let cur = st.config.read().unwrap_or_else(|e| e.into_inner());
+                        if !cur.pricing_auto_sync
+                            || !models_dev::is_stale(
+                                &cur.pricing_synced_at,
+                                models_dev::now_secs(),
+                            )
+                        {
+                            return;
+                        }
+                    }
+                    let catalog = match models_dev::fetch_catalog(&st.client).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("[pricing] 启动同步失败（保持旧费率）: {}", e);
+                            return;
+                        }
+                    };
+                    let (changed, snapshot) = {
+                        let mut cur = st.config.write().unwrap_or_else(|e| e.into_inner());
+                        let changed = models_dev::apply_catalog(&mut cur, &catalog);
+                        cur.pricing_synced_at = models_dev::now_secs().to_string();
+                        (changed, cur.clone())
+                    };
+                    if let Err(e) = config::save_config_file(&snapshot) {
+                        eprintln!("[pricing] WARN: 同步结果落盘失败: {}", e);
+                    }
+                    eprintln!("[pricing] 启动同步完成：{} 个模型费率有变化", changed);
+                });
+            }
+
             // macOS：显式挂应用菜单 + 编辑菜单，保证 Accessory 模式下剪贴板快捷键可用（对齐 v1）
             #[cfg(target_os = "macos")]
             {
@@ -158,6 +195,7 @@ pub fn run() {
             commands::get_logs,
             commands::proxy_status,
             commands::set_port,
+            commands::sync_pricing,
             commands::force_quit_and_relaunch
         ])
         .run(tauri::generate_context!())

@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { testProvider } from "@/lib/ipc";
+import { testProvider, type ModelPricing } from "@/lib/ipc";
 import {
   MAX_MODELS,
   THINKING_LABELS,
@@ -42,6 +42,83 @@ const inputCls =
 
 const fieldLabelCls = "text-[11px] font-medium tracking-[.03em] text-muted-foreground";
 
+const PRICE_FIELDS = [
+  { key: "input", label: "输入" },
+  { key: "output", label: "输出" },
+  { key: "cache_read", label: "缓存读" },
+  { key: "cache_write", label: "缓存写" },
+] as const;
+
+/**
+ * 模型费率编辑区（§3.1）：四个字段全部可选，单位「每百万 token」。
+ * 留空时用 models.dev 同步来的值（占位符里显示）；手填任意一格就完全接管这一行 ——
+ * 同步值是美元、手填可能是人民币，逐字段混用会把两种币种加在一起。
+ */
+function PricingPanel({
+  pricing,
+  synced,
+  onChange,
+}: {
+  pricing?: ModelPricing;
+  synced?: ModelPricing;
+  onChange: (fn: (p: ModelPricing) => void) => void;
+}) {
+  const usd = pricing?.currency === "USD";
+  const unit = usd ? "$" : "¥";
+  const manual = PRICE_FIELDS.some((f) => pricing?.[f.key] != null);
+  // 手填了但缺输入/输出价 —— 这一行不会被写入（Claude schema 四字段必填）
+  const partial = manual && (pricing?.input == null || pricing?.output == null);
+  const hasSynced = PRICE_FIELDS.some((f) => synced?.[f.key] != null);
+
+  return (
+    <div className="mb-1 ml-1 mr-1 rounded-[9px] border border-dashed bg-background px-3 py-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10.5px] text-muted-foreground">
+          费率 · {unit} / 百万 token · 输入与输出必填
+        </span>
+        {/* §五①：预设库存人民币原价，写入时按设置页的汇率换算；
+            少数本来就按美元计价的中转标 USD 跳过换算 */}
+        <button
+          type="button"
+          onClick={() => onChange((p) => (p.currency = usd ? "" : "USD"))}
+          className="mono rounded-[5px] border px-1.5 py-px text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {usd ? "USD（不换算）" : "CNY（按汇率换算）"}
+        </button>
+      </div>
+      <div className="mt-1.5 grid grid-cols-4 gap-1.5">
+        {PRICE_FIELDS.map((f) => (
+          <label key={f.key} className="flex flex-col gap-[3px]">
+            <span className="text-[10px] text-faint">{f.label}</span>
+            <Input
+              value={pricing?.[f.key] ?? ""}
+              placeholder={synced?.[f.key] != null ? `$${synced[f.key]}` : "—"}
+              onChange={(e) => {
+                const raw = e.target.value.replace(/[^0-9.]/g, "");
+                const n = raw === "" ? undefined : Number(raw);
+                onChange((p) => {
+                  p[f.key] = n !== undefined && Number.isFinite(n) ? n : undefined;
+                });
+              }}
+              inputMode="decimal"
+              className="mono h-[27px] rounded-[7px] border-input bg-card px-2 text-[11px] md:text-[11px] shadow-none dark:bg-card"
+            />
+          </label>
+        ))}
+      </div>
+      <div className="mt-1.5 text-[10px] text-faint">
+        {manual
+          ? partial
+            ? "输入与输出价都填上才会写入（Claude 的费率表四个字段都必填，缓存价留空按 0 计）"
+            : "已手填，同步值不再生效（清空全部四格即恢复自动同步）"
+          : hasSynced
+            ? "灰字为 models.dev 同步值（美元），留空即采用"
+            : "未填 → Claude 会按 Anthropic 官方价估算该槽位，也就是假账单"}
+      </div>
+    </div>
+  );
+}
+
 /** 服务商编辑器（design.md §6.2 右栏）：一次只编辑一个服务商。 */
 export function ProviderEditor({ index }: { index: number }) {
   const {
@@ -56,6 +133,8 @@ export function ProviderEditor({ index }: { index: number }) {
 
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
+  /** 展开费率面板的模型下标（一次只开一个）。 */
+  const [pricingOpen, setPricingOpen] = useState<number | null>(null);
 
   // 预设引导流：跳入本页时聚焦密钥输入框
   const keyRef = useRef<HTMLInputElement>(null);
@@ -70,6 +149,7 @@ export function ProviderEditor({ index }: { index: number }) {
   // 切换服务商时清掉编辑器瞬态
   useEffect(() => {
     setShowKey(false);
+    setPricingOpen(null);
   }, [index]);
 
   const p = draft?.providers[index];
@@ -168,49 +248,80 @@ export function ProviderEditor({ index }: { index: number }) {
       {p.models.map((m, mi) => {
         const slot = rawSlotForModel(draft, index, mi);
         const dlId = `ml-models-${index}-${mi}`;
+        const priced = PRICE_FIELDS.some(
+          (f) => m.pricing?.[f.key] != null || m.pricing_synced?.[f.key] != null,
+        );
         return (
-          <div key={mi} className="flex items-center gap-[9px]">
-            <Input
-              value={m.name}
-              onChange={(e) =>
-                updateDraft((c) => {
-                  c.providers[index].models[mi].name = e.target.value;
-                })
-              }
-              list={presetModels.length > 0 ? dlId : undefined}
-              placeholder="输入或选择模型"
-              className={cn(inputCls, "min-w-0 flex-1")}
-            />
-            {presetModels.length > 0 && (
-              <datalist id={dlId}>
-                {presetModels.map((pm) => (
-                  <option key={pm} value={pm} />
-                ))}
-              </datalist>
+          <div key={mi} className="flex flex-col">
+            <div className="flex items-center gap-[9px]">
+              <Input
+                value={m.name}
+                onChange={(e) =>
+                  updateDraft((c) => {
+                    c.providers[index].models[mi].name = e.target.value;
+                  })
+                }
+                list={presetModels.length > 0 ? dlId : undefined}
+                placeholder="输入或选择模型"
+                className={cn(inputCls, "min-w-0 flex-1")}
+              />
+              {presetModels.length > 0 && (
+                <datalist id={dlId}>
+                  {presetModels.map((pm) => (
+                    <option key={pm} value={pm} />
+                  ))}
+                </datalist>
+              )}
+              <Switch
+                checked={!!m.to_1m}
+                onCheckedChange={(ck) =>
+                  updateDraft((c) => {
+                    c.providers[index].models[mi].to_1m = ck ? "auto" : "";
+                  })
+                }
+              />
+              <span className="-ml-[3px] text-[10.5px] text-faint">1M</span>
+              {/* 费率开关：未填时用警示色 —— 不填 = Claude 按 Anthropic 官方价估算 */}
+              <button
+                onClick={() => setPricingOpen(pricingOpen === mi ? null : mi)}
+                className={cn(
+                  "flex-none rounded-[5px] border px-1.5 py-px text-[10px] transition-colors",
+                  priced
+                    ? "text-muted-foreground hover:text-foreground"
+                    : "border-warning/40 text-warning",
+                )}
+                title={priced ? "编辑费率" : "未填费率：Claude 会按 Anthropic 官方价估算"}
+              >
+                费率
+              </button>
+              <span className="mono max-w-[150px] flex-none truncate text-[10px] text-faint">
+                {slot ? `→ ${slot}` : ""}
+              </span>
+              <button
+                onClick={() =>
+                  updateDraft((c) => {
+                    c.providers[index].models.splice(mi, 1);
+                  })
+                }
+                className="flex-none text-faint transition-colors hover:text-destructive"
+                aria-label="删除模型"
+              >
+                <X size={13} />
+              </button>
+            </div>
+            {pricingOpen === mi && (
+              <PricingPanel
+                pricing={m.pricing}
+                synced={m.pricing_synced}
+                onChange={(fn) =>
+                  updateDraft((c) => {
+                    const entry = c.providers[index].models[mi];
+                    entry.pricing ??= {};
+                    fn(entry.pricing);
+                  })
+                }
+              />
             )}
-            <Switch
-              checked={!!m.to_1m}
-              onCheckedChange={(ck) =>
-                updateDraft((c) => {
-                  c.providers[index].models[mi].to_1m = ck ? "auto" : "";
-                })
-              }
-            />
-            <span className="-ml-[3px] text-[10.5px] text-faint">1M</span>
-            <span className="mono max-w-[196px] flex-none truncate text-[10px] text-faint">
-              {slot ? `→ ${slot}` : ""}
-            </span>
-            <button
-              onClick={() =>
-                updateDraft((c) => {
-                  c.providers[index].models.splice(mi, 1);
-                })
-              }
-              className="flex-none text-faint transition-colors hover:text-destructive"
-              aria-label="删除模型"
-            >
-              <X size={13} />
-            </button>
           </div>
         );
       })}
@@ -229,7 +340,7 @@ export function ProviderEditor({ index }: { index: number }) {
               </Button>
             </span>
           </TooltipTrigger>
-          <TooltipContent>所有服务商的模型总数最多 8 个</TooltipContent>
+          <TooltipContent>所有服务商的模型总数最多 {MAX_MODELS} 个</TooltipContent>
         </Tooltip>
       ) : (
         <Button

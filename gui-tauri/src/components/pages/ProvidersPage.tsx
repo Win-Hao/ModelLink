@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { flattenModels, providerDisplayName } from "@/lib/presets";
+import { MAX_MODELS, flattenModels, providerDisplayName } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -42,7 +42,10 @@ export function ProvidersPage() {
         <div>
           <h1 className="text-[19px] font-[650] leading-[1.25] tracking-[-0.01em]">服务商</h1>
           <p className="mt-[3px] text-xs text-muted-foreground">
-            <span className="mono">{used} / 8</span> 个模型槽位已使用
+            <span className="mono">
+              {used} / {MAX_MODELS}
+            </span>{" "}
+            个模型槽位已使用
           </p>
         </div>
         <ApplyPill />

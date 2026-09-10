@@ -4,18 +4,47 @@ import type { Config } from "@/lib/ipc";
 // 服务商预设与槽位常量 —— 数据自 v1 ui.html:272-360 平移，勿改。
 // ============================================================
 
-export const MAX_MODELS = 8;
+/** 镜像后端 config.rs::MAX_MODELS（2.1-B §3.6：8 → 20）。 */
+export const MAX_MODELS = 20;
 
-export const ANTHROPIC_SLOTS = [
-  "claude-3-opus-latest",
-  "claude-3-5-sonnet-latest",
-  "claude-3-sonnet-20240229",
-  "claude-3-haiku-20240307",
-  "claude-3-5-haiku-latest",
-  "claude-3-opus-20240229",
-  "claude-3-5-sonnet-20241022",
-  "claude-3-5-sonnet-20240620",
-] as const;
+/** 镜像后端 config.rs::DEFAULT_USD_RATE（§五①）。 */
+export const DEFAULT_USD_RATE = 7.2;
+
+/** 镜像后端 config.rs::SLOT_POOL_VERSION —— 换槽位池时两边必须同时改。 */
+export const SLOT_POOL_VERSION = "2.1";
+
+/**
+ * 槽位池（§2.1），镜像后端 config.rs::SLOT_POOL，顺序即分配优先级。
+ *
+ * `efforts` 是 **Claude Desktop 自己**那张按模型 ID 精确匹配的硬编码表（Vwt）里的档位，
+ * 只用来在界面上告诉用户「这个模型在 Claude 里能不能调推理强度」。
+ * ⚠️ 它决定的只是桌面端的选择器 UI —— 发给上游的参数一律不得从槽位名推断（§3.11.5）。
+ */
+export type Slot = { id: string; efforts: string[] };
+
+export const SLOT_POOL: Slot[] = [
+  // 一线：5 档 effort + auto 模式
+  { id: "claude-opus-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  { id: "claude-sonnet-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  { id: "claude-opus-4-8", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  { id: "claude-opus-4-7", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  // 二线：4 档
+  { id: "claude-opus-4-6", efforts: ["low", "medium", "high", "max"] },
+  { id: "claude-sonnet-4-6", efforts: ["low", "medium", "high", "max"] },
+  // 三线：仅 extended 模式，无 effort 选择器
+  { id: "claude-sonnet-4-5", efforts: [] },
+  { id: "claude-haiku-4-5", efforts: [] },
+];
+
+/** 第 n 个模型（0-based）占的槽位；池子用完走 claude-ml-{n} 溢出层（无选择器）。 */
+export function slotId(index: number): string {
+  return SLOT_POOL[index]?.id ?? `claude-ml-${index - SLOT_POOL.length + 1}`;
+}
+
+/** 该槽位在 Claude Desktop 里有几档推理强度可选（0 = 不显示选择器）。 */
+export function slotEfforts(index: number): string[] {
+  return SLOT_POOL[index]?.efforts ?? [];
+}
 
 export type Preset = {
   id: string;
@@ -165,9 +194,11 @@ export function providerDisplayName(url: string, index: number): string {
   return detectProvider(url) || `服务商 ${index + 1}`;
 }
 
-/** 链路板 / 编辑器共用的槽位展开（镜像后端 flatten_config 语义：跳过空名、封顶 8）。 */
+/** 链路板 / 编辑器共用的槽位展开（镜像后端 flatten_config 语义：跳过空名、封顶 MAX_MODELS）。 */
 export type FlatModel = {
   slot: string;
+  /** 该槽位在 Claude Desktop 里的推理强度档位（空 = 无选择器）。 */
+  efforts: string[];
   name: string;
   to1m: boolean;
   providerIndex: number;
@@ -181,7 +212,8 @@ export function flattenModels(config: Config): FlatModel[] {
     p.models.forEach((m, mi) => {
       if (count < MAX_MODELS && m.name) {
         out.push({
-          slot: ANTHROPIC_SLOTS[count],
+          slot: slotId(count),
+          efforts: slotEfforts(count),
           name: m.name,
           to1m: !!m.to_1m,
           providerIndex: pi,
@@ -199,10 +231,10 @@ export function rawSlotForModel(config: Config, pi: number, mi: number): string 
   let idx = 0;
   for (let i = 0; i < pi; i++) idx += config.providers[i]?.models.length ?? 0;
   idx += mi;
-  return idx < ANTHROPIC_SLOTS.length ? ANTHROPIC_SLOTS[idx] : "";
+  return idx < MAX_MODELS ? slotId(idx) : "";
 }
 
-/** 所有服务商模型总数（含未命名行，8 上限判定用，平移 v1 totalModels）。 */
+/** 所有服务商模型总数（含未命名行，上限判定用，平移 v1 totalModels）。 */
 export function totalModelsRaw(config: Config): number {
   return config.providers.reduce((s, p) => s + p.models.length, 0);
 }

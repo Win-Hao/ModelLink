@@ -109,7 +109,7 @@ pub fn run() {
                             return;
                         }
                     }
-                    let catalog = match models_dev::fetch_catalog(&st.client).await {
+                    let (catalog, model_index) = match models_dev::fetch_catalog(&st.client).await {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("[pricing] 启动同步失败（保持旧费率）: {}", e);
@@ -119,6 +119,7 @@ pub fn run() {
                     let (changed, snapshot) = {
                         let mut cur = st.config.write().unwrap_or_else(|e| e.into_inner());
                         let changed = models_dev::apply_catalog(&mut cur, &catalog);
+                        cur.models_dev_models = model_index;
                         cur.pricing_synced_at = models_dev::now_secs().to_string();
                         (changed, cur.clone())
                     };
@@ -197,6 +198,7 @@ pub fn run() {
             commands::proxy_status,
             commands::set_port,
             commands::sync_pricing,
+            commands::available_models,
             commands::desktop_info,
             commands::force_quit_and_relaunch
         ])

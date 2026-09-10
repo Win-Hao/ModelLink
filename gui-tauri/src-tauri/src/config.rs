@@ -116,6 +116,13 @@ pub struct Config {
     /// 上次成功同步的时间（Unix 秒，字符串）。空 = 从没同步过。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pricing_synced_at: String,
+    /// models.dev 服务商 ID → 它当前提供的模型 ID（按发布日期新→旧），
+    /// 供模型名输入框做补全。后端专管，随费率一起同步。
+    ///
+    /// 写死在代码里的预设清单只能靠发版更新，实测已经落后两代
+    /// （预设是 Kimi-k2.6 / 2026-04-21，而 Kimi Code 现在提供的是 k3 / 2026-07-16）。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub models_dev_models: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -128,6 +135,7 @@ impl Default for Config {
             last_applied_pool: String::new(),
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
+            models_dev_models: std::collections::HashMap::new(),
         }
     }
 }

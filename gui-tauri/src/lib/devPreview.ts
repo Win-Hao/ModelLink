@@ -131,6 +131,8 @@ mockIPC(async (cmd, payload) => {
       return null;
     case "proxy_status":
       return { running: !params.has("portdown"), port: store.port ?? 5678 };
+    case "available_models":
+      return ["k3", "k3-256k", "kimi-for-coding"];
     case "desktop_info":
       return { version: "1.46388.3", unavailable: [] };
     case "sync_pricing": {

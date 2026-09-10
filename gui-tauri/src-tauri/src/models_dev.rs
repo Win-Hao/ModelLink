@@ -35,6 +35,48 @@ pub struct ModelInfo {
 /// 拍平后的目录：models.dev 服务商 ID → 模型 ID → 模型信息。
 pub type Catalog = HashMap<String, HashMap<String, ModelInfo>>;
 
+/// models.dev 服务商 ID → 它当前提供的模型 ID 列表（按发布日期新→旧）。
+pub type ModelIndex = HashMap<String, Vec<String>>;
+
+/// 从 api.json 抽出每家服务商的模型 ID 列表，供模型名输入框做补全。
+///
+/// 与 `parse_catalog` 分开：那个只收有 `cost` 的条目（费率表用），
+/// 而补全列表要列全这家「现在提供什么」，没标价的也算。
+///
+/// 排序按 `release_date` 倒序 —— 用户接进来第一件事是挑当前能用的模型，
+/// 最新的排最前最有用；没写日期的排最后但不丢。
+pub fn parse_model_ids(body: &[u8]) -> ModelIndex {
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return ModelIndex::new();
+    };
+    let Some(obj) = root.as_object() else {
+        return ModelIndex::new();
+    };
+    let mut out = ModelIndex::new();
+    for (provider_id, provider) in obj {
+        let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        let mut rows: Vec<(String, String)> = models
+            .iter()
+            .map(|(id, m)| {
+                let date = m
+                    .get("release_date")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (id.clone(), date)
+            })
+            .collect();
+        // 日期倒序；同日期或都没日期时按 ID 升序，保证输出稳定
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if !rows.is_empty() {
+            out.insert(provider_id.clone(), rows.into_iter().map(|(id, _)| id).collect());
+        }
+    }
+    out
+}
+
 /// 本地服务商 URL → models.dev 服务商 ID。
 ///
 /// 内置预设逐个对上；订阅制方案（Kimi Code / 百炼 Coding Plan / 小米 Token Plan）
@@ -56,6 +98,29 @@ pub fn provider_id_for_url(url: &str) -> Option<&'static str> {
         ("xiaomimimo", "xiaomi-token-plan-cn"),
     ];
     table.iter().find(|(host, _)| u.contains(host)).map(|(_, id)| *id)
+}
+
+/// 我们认得的全部 models.dev 服务商 ID（`provider_id_for_url` 的值域）。
+pub fn known_provider_ids() -> Vec<&'static str> {
+    vec![
+        "kimi-for-coding",
+        "moonshotai-cn",
+        "deepseek",
+        "minimax-cn",
+        "minimax",
+        "alibaba-coding-plan-cn",
+        "alibaba-token-plan-cn",
+        "alibaba-cn",
+        "zhipuai",
+        "xiaomi-token-plan-cn",
+    ]
+}
+
+/// 只留我们认得的那几家 —— api.json 有 213 家，全存进 config.json 会让它从
+/// 600 字节涨到 238 KB（实测），而那个文件每次编辑都要重写。
+pub fn keep_known_providers(index: ModelIndex) -> ModelIndex {
+    let known = known_provider_ids();
+    index.into_iter().filter(|(k, _)| known.contains(&k.as_str())).collect()
 }
 
 /// 从 api.json 解析出费率表。只取 `cost`，其余字段（limit / modalities / …）一律忽略。
@@ -205,12 +270,15 @@ pub fn apply_catalog(config: &mut Config, catalog: &Catalog) -> usize {
 
 /// 拉取 + 解析。**不碰配置** —— 网络往返期间用户可能正在改配置，
 /// 落盘一律等回到主流程、重新取写锁之后再做（见 commands::sync_pricing）。
-pub async fn fetch_catalog(client: &reqwest::Client) -> Result<Catalog, String> {
+pub async fn fetch_catalog(client: &reqwest::Client) -> Result<(Catalog, ModelIndex), String> {
     fetch_catalog_from(client, MODELS_DEV_API_URL).await
 }
 
 /// 同上，地址可注入（单测用）。
-pub async fn fetch_catalog_from(client: &reqwest::Client, url: &str) -> Result<Catalog, String> {
+pub async fn fetch_catalog_from(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(Catalog, ModelIndex), String> {
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(20))
@@ -221,7 +289,7 @@ pub async fn fetch_catalog_from(client: &reqwest::Client, url: &str) -> Result<C
         return Err(format!("models.dev 返回 HTTP {}", resp.status().as_u16()));
     }
     let body = resp.bytes().await.map_err(|e| format!("读取 models.dev 响应失败: {e}"))?;
-    parse_catalog(&body)
+    Ok((parse_catalog(&body)?, keep_known_providers(parse_model_ids(&body))))
 }
 
 /// 把「后端专管」的同步费率从旧配置搬到前端回传的新配置上（按 服务商 URL + 模型名 匹配，
@@ -276,8 +344,10 @@ mod tests {
     const SAMPLE: &[u8] = br#"{
       "moonshotai-cn": { "name": "Moonshot AI (China)", "models": {
         "kimi-k2.6": { "cost": { "input": 0.95, "output": 4.0, "cache_read": 0.16 },
+                       "release_date": "2026-04-21",
                        "limit": { "context": 262144 } },
         "kimi-k3":   { "cost": { "input": 3, "output": 15, "cache_read": 0.3 },
+                       "release_date": "2026-07-16",
                        "limit": { "context": 1048576 } } } },
       "kimi-for-coding": { "name": "Kimi For Coding", "models": {
         "k3": { "cost": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 } } } },
@@ -316,6 +386,59 @@ mod tests {
         let p = &c["kimi-for-coding"]["k3"].pricing;
         assert_eq!(p.input, Some(0.0));
         assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn model_ids_are_listed_newest_first() {
+        // 选择器里最有用的排序是「最新的排最前」—— 用户接进来第一件事是挑当前能用的模型
+        let idx = parse_model_ids(SAMPLE);
+        assert_eq!(idx["moonshotai-cn"], vec!["kimi-k3", "kimi-k2.6"]);
+        assert_eq!(idx["kimi-for-coding"], vec!["k3"]);
+    }
+
+    #[test]
+    fn only_providers_we_can_map_are_kept() {
+        // api.json 有 213 家；全存进 config.json 会让它从 600 字节涨到 238 KB
+        let idx = keep_known_providers(parse_model_ids(SAMPLE));
+        assert!(idx.contains_key("moonshotai-cn"));
+        assert!(idx.contains_key("kimi-for-coding"));
+        assert!(!idx.contains_key("no-cost"), "认不出的服务商不该留");
+    }
+
+    #[test]
+    fn every_mapped_provider_id_is_in_the_known_list() {
+        // 两处一旦漂移，某家的补全列表就会静默消失
+        for url in [
+            "https://api.kimi.com/coding/",
+            "https://api.moonshot.cn/anthropic",
+            "https://api.deepseek.com/anthropic",
+            "https://api.minimaxi.com/anthropic",
+            "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+            "https://open.bigmodel.cn/api/anthropic",
+        ] {
+            let pid = provider_id_for_url(url).unwrap_or_else(|| panic!("{url} 没映射"));
+            assert!(known_provider_ids().contains(&pid), "{pid} 不在 known 列表里");
+        }
+    }
+
+    #[test]
+    fn model_ids_include_entries_without_a_cost_block() {
+        // 补全列表要列全这家「现在提供什么」，没标价的条目也算
+        let body = br#"{"x": {"models": {
+            "with-cost": {"cost": {"input": 1}, "release_date": "2026-01-01"},
+            "no-cost":   {"release_date": "2026-02-01"}
+        }}}"#;
+        assert_eq!(parse_model_ids(body)["x"], vec!["no-cost", "with-cost"]);
+    }
+
+    #[test]
+    fn model_ids_without_release_date_sort_last_but_are_kept() {
+        let body = br#"{"x": {"models": {
+            "dated": {"release_date": "2026-01-01"},
+            "undated": {}
+        }}}"#;
+        assert_eq!(parse_model_ids(body)["x"], vec!["dated", "undated"]);
     }
 
     #[test]

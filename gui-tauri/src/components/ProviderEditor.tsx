@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Eye, EyeOff, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -24,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { testProvider } from "@/lib/ipc";
+import { availableModels, testProvider } from "@/lib/ipc";
 import {
   MAX_MODELS,
   claims1mItDoesNotHave,
@@ -76,9 +77,22 @@ export function ProviderEditor({ index }: { index: number }) {
   }, [index]);
 
   const p = draft?.providers[index];
+
+  // 模型补全优先用 models.dev 的实时清单 —— 写死在代码里的预设只能靠发版更新，
+  // 实测已落后两代（预设 Kimi-k2.6 / 2026-04-21，而 Kimi Code 现在是 k3 / 2026-07-16）。
+  // 拉不到（认不出这家、或还没同步过）时退回预设清单。
+  const liveModels = useQuery({
+    queryKey: ["available-models", p?.target_url ?? ""],
+    queryFn: () => availableModels(p!.target_url),
+    enabled: !!p?.target_url,
+    staleTime: 5 * 60 * 1000,
+  });
+
   if (!draft || !p) return null;
 
-  const presetModels = getPresetModels(p.target_url);
+  const presetModels = liveModels.data?.length
+    ? liveModels.data
+    : getPresetModels(p.target_url);
   const thinkOpts = getThinkingOptions(p.target_url);
   const capReached = totalModelsRaw(draft) >= MAX_MODELS;
   const name = providerDisplayName(p.target_url, index);

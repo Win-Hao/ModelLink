@@ -36,6 +36,7 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         config.last_applied_pool = cur.last_applied_pool.clone();
         config.port = cur.port;
         config.pricing_synced_at = cur.pricing_synced_at.clone();
+        config.models_dev_models = cur.models_dev_models.clone();
         // 后台同步可能刚写完，而前端手上这份草稿是同步前的 —— 别让它抹掉同步结果
         models_dev::preserve_synced_pricing(&mut config, &cur);
     }
@@ -213,7 +214,7 @@ pub async fn sync_pricing(
     }
 
     // 网络往返期间不持锁 —— 拿到 catalog 再回来落盘
-    let catalog = match models_dev::fetch_catalog(&state.client).await {
+    let (catalog, model_index) = match models_dev::fetch_catalog(&state.client).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[pricing] 同步失败: {}", e);
@@ -230,6 +231,7 @@ pub async fn sync_pricing(
     let (changed, config) = {
         let mut cur = state.config.write().unwrap_or_else(|e| e.into_inner());
         let changed = models_dev::apply_catalog(&mut cur, &catalog);
+        cur.models_dev_models = model_index;
         cur.pricing_synced_at = now.to_string();
         (changed, cur.clone())
     };
@@ -244,6 +246,17 @@ pub async fn sync_pricing(
         message: String::new(),
         synced_at: now.to_string(),
     })
+}
+
+/// 这个服务商当前提供哪些模型（models.dev 数据，按发布日期新→旧），
+/// 供模型名输入框做补全。认不出这家服务商、或还没同步过时返回空。
+#[tauri::command]
+pub fn available_models(state: State<'_, Arc<ProxyState>>, target_url: String) -> Vec<String> {
+    let c = state.config.read().unwrap_or_else(|e| e.into_inner());
+    models_dev::provider_id_for_url(&target_url)
+        .and_then(|pid| c.models_dev_models.get(pid))
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[tauri::command]

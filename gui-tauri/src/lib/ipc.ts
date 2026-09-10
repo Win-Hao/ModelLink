@@ -89,3 +89,6 @@ export const setPort = (port: number) => invoke<ProxyStatus>("set_port", { port 
 export const syncPricing = (force: boolean) =>
   invoke<PricingSyncResult>("sync_pricing", { force });
 export const desktopInfo = () => invoke<DesktopInfo>("desktop_info");
+/** 该服务商当前提供的模型（models.dev，按发布日期新→旧）；认不出或未同步时为空。 */
+export const availableModels = (targetUrl: string) =>
+  invoke<string[]>("available_models", { targetUrl });

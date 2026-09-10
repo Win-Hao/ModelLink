@@ -102,14 +102,17 @@ export const PRESETS: Preset[] = [
     name: "Kimi Code（订阅制）",
     url: "https://api.kimi.com/coding/",
     models: ["Kimi-k2.6"],
-    thinkingOptions: ["", "off"],
+    // 官方文档：output_config.effort 支持 low / high / max，默认 max。
+    // medium 与 xhigh 是 Claude Desktop 的档位，Kimi 在网关侧映射掉，这里不列。
+    thinkingOptions: ["", "off", "low", "high", "max"],
   },
   {
     id: "kimi",
     name: "Kimi 开放平台（按量付费）",
     url: "https://api.moonshot.cn/anthropic",
     models: ["kimi-k2.5", "kimi-k2.6"],
-    thinkingOptions: ["", "off"],
+    // 同上，官方文档所列的三档
+    thinkingOptions: ["", "off", "low", "high", "max"],
   },
   {
     id: "minimax",
@@ -185,7 +188,10 @@ export function getPresetModels(url: string): string[] {
 export const THINKING_LABELS: Record<string, string> = {
   "": "默认（不干预）",
   off: "关闭思考",
+  low: "轻量 (low)",
+  medium: "中等 (medium)",
   high: "标准 (high)",
+  xhigh: "较高 (xhigh)",
   max: "深度 (max)",
 };
 

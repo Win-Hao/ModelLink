@@ -24,7 +24,14 @@ pub struct ProbeReport {
     /// 接受 `claude-opus-5` 这类槽位名（不接受就必须靠代理改写 model 字段）。
     pub accepts_claude_slot: bool,
     /// `output_config.effort` 五档各自的接受情况。
+    ///
+    /// ⚠️ 「接受」= 没被拒，**不等于真的生效**。部分服务商在网关侧把档位映射到自己的
+    /// 档位（Kimi 官方只有 low/high/max，medium→high、xhigh→max），也有端点会收下
+    /// 字段后原样忽略。要证明生效只能看思考量，见 `effort_thinking`。
     pub effort_accepted: Vec<(String, bool)>,
+    /// 各档位实测的思考 token 数（`usage.output_tokens_details.thinking_tokens`）。
+    /// 探测请求刻意很小，多数情况下全是 0 —— 只有当各档确实拉开差距时才是「已生效」的实证。
+    pub effort_thinking: Vec<(String, u64)>,
     /// 原生 thinking 三形态的接受情况。
     pub thinking_variants: Vec<(String, bool)>,
     /// 本次探测**观察到**了缓存命中。
@@ -66,6 +73,22 @@ pub fn parse_upstream_efforts(payload: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// 响应里的思考 token 数（Kimi 等按 Anthropic 格式的端点放在这里）。
+pub fn thinking_tokens(body: &serde_json::Value) -> u64 {
+    body.get("usage")
+        .and_then(|u| u.get("output_tokens_details"))
+        .and_then(|d| d.get("thinking_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// 各档位的思考量是否确实拉开了差距 —— 这是「effort 真的生效」的唯一实证。
+/// 全 0 或全相同都说明看不出来（探测请求太小），**不代表没生效**。
+pub fn effort_visibly_differs(samples: &[(String, u64)]) -> bool {
+    let nonzero: Vec<u64> = samples.iter().map(|(_, v)| *v).filter(|v| *v > 0).collect();
+    nonzero.len() >= 2 && nonzero.iter().min() != nonzero.iter().max()
+}
+
 /// 上游是否真的把缓存读回来了。两次同样的大 system 请求，第二次应出现
 /// `cache_read_input_tokens > 0`。
 pub fn cache_hit(second: &serde_json::Value) -> bool {
@@ -97,7 +120,14 @@ pub fn headlines(r: &ProbeReport) -> Vec<String> {
         .map(|(k, _)| k.as_str())
         .collect();
     if accepted.len() == EFFORT_LEVELS.len() {
-        out.push("✓ 五档推理强度全部接受，桌面端选择器可直接用（代理原样透传）。".to_string());
+        if effort_visibly_differs(&r.effort_thinking) {
+            out.push("✓ 五个档位均被接受，且各档思考量确有差异 —— 已确认真实生效。".to_string());
+        } else {
+            out.push(
+                "✓ 五个档位均未被拒。⚠ 但没能确认是否真的生效：探测请求很小，看不出思考量差异；                 而且部分服务商会在网关侧把档位映射到自己的档（如 Kimi 官方只有 low/high/max）。"
+                    .to_string(),
+            );
+        }
     } else if accepted.is_empty() {
         out.push("✗ 不接受 output_config.effort，代理会在首次被拒后自动去掉并记住。".to_string());
     } else {
@@ -232,11 +262,14 @@ pub async fn run(client: &reqwest::Client, base: &str, key: &str, model: &str) -
             (b, Some("effort-2025-11-24"))
         })
         .collect();
-    for (lv, (st, _)) in EFFORT_LEVELS
+    for (lv, (st, body)) in EFFORT_LEVELS
         .iter()
         .zip(call_all(client, base, key, effort_reqs).await)
     {
         r.effort_accepted.push((lv.to_string(), st == Some(200)));
+        if st == Some(200) {
+            r.effort_thinking.push((lv.to_string(), thinking_tokens(&body)));
+        }
     }
 
     // 5. 原生 thinking 三形态（并发）
@@ -332,6 +365,44 @@ mod tests {
         assert!(!cache_hit(&serde_json::json!({})));
     }
 
+    #[test]
+    fn effort_effect_needs_two_different_nonzero_samples() {
+        // 全 0 = 看不出来（探测请求太小），不代表没生效
+        assert!(!effort_visibly_differs(&[("low".into(), 0), ("max".into(), 0)]));
+        // 只有一个非 0 也不够
+        assert!(!effort_visibly_differs(&[("low".into(), 0), ("max".into(), 500)]));
+        // 两个非 0 但一样大 → 说明档位没起作用
+        assert!(!effort_visibly_differs(&[("low".into(), 500), ("max".into(), 500)]));
+        // 拉开差距才算实证
+        assert!(effort_visibly_differs(&[("low".into(), 1337), ("max".into(), 3616)]));
+    }
+
+    #[test]
+    fn thinking_tokens_reads_the_anthropic_shape() {
+        let body = serde_json::json!({
+            "usage": {"output_tokens_details": {"thinking_tokens": 3616}}
+        });
+        assert_eq!(thinking_tokens(&body), 3616);
+        assert_eq!(thinking_tokens(&serde_json::json!({"usage": {}})), 0);
+    }
+
+    #[test]
+    fn all_levels_accepted_but_no_evidence_says_so_plainly() {
+        // 不能因为都返回 200 就宣称「可直接用」—— 那是 over-claim
+        let r = full_report();
+        let line = headlines(&r).into_iter().next().unwrap();
+        assert!(line.contains("未被拒"), "{line}");
+        assert!(line.contains("没能确认"), "{line}");
+    }
+
+    #[test]
+    fn measured_differences_upgrade_the_headline_to_confirmed() {
+        let mut r = full_report();
+        r.effort_thinking = vec![("low".into(), 1337), ("max".into(), 3616)];
+        let line = headlines(&r).into_iter().next().unwrap();
+        assert!(line.contains("已确认真实生效"), "{line}");
+    }
+
     fn full_report() -> ProbeReport {
         ProbeReport {
             ok: true,
@@ -345,10 +416,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fully_capable_provider_gets_one_positive_headline() {
+    fn a_fully_capable_provider_gets_one_headline() {
         let lines = headlines(&full_report());
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("五档"));
+        assert!(lines[0].contains("五个档位"));
     }
 
     #[test]

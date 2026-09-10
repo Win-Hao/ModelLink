@@ -178,13 +178,19 @@ function ProbePanel({ data, onClose }: { data: ProbeResponse; onClose: () => voi
             />
             <Row label="接受 claude-* 槽位名" ok={r.accepts_claude_slot} />
             <Row
-              label="推理强度 output_config.effort"
+              label="推理强度 output_config.effort（未被拒 ≠ 已生效）"
               ok={r.effort_accepted.some(([, v]) => v)}
               note={r.effort_accepted
                 .filter(([, v]) => v)
                 .map(([k]) => k)
                 .join("/")}
             />
+            {r.effort_thinking.some(([, v]) => v > 0) && (
+              <div className="py-[3px] pl-[18px] text-[10px] text-faint">
+                各档思考 token：
+                {r.effort_thinking.map(([k, v]) => `${k}=${v}`).join("  ")}
+              </div>
+            )}
             <Row
               label="原生 thinking 字段"
               ok={r.thinking_variants.some(([, v]) => v)}

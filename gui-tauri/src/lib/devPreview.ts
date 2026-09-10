@@ -148,6 +148,11 @@ mockIPC(async (cmd, payload) => {
             ["xhigh", true],
             ["max", true],
           ],
+          effort_thinking: [
+            ["low", 1337],
+            ["high", 3029],
+            ["max", 3616],
+          ],
           thinking_variants: [
             ["adaptive", true],
             ["enabled", true],
@@ -159,7 +164,7 @@ mockIPC(async (cmd, payload) => {
         },
         headlines: [
           "⚠ 这家会**静默回落**：请求一个不存在的模型也返回 200，直接给默认模型。",
-          "✓ 五档推理强度全部接受，桌面端选择器可直接用（代理原样透传）。",
+          "✓ 五个档位均被接受，且各档思考量确有差异 —— 已确认真实生效。",
         ],
       };
     }

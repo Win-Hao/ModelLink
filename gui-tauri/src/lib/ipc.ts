@@ -113,6 +113,8 @@ export type ProbeReport = {
   validates_model_name: boolean;
   accepts_claude_slot: boolean;
   effort_accepted: [string, boolean][];
+  /** 各档位实测思考 token 数；只有拉开差距才是「真的生效」的实证。 */
+  effort_thinking: [string, number][];
   thinking_variants: [string, boolean][];
   prompt_caching: boolean;
   accepts_1m_beta: boolean;

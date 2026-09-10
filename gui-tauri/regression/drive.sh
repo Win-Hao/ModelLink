@@ -14,6 +14,8 @@ S0="${SLOT0:-claude-opus-5}"
 S1="${SLOT1:-claude-sonnet-5}"
 S2="${SLOT2:-claude-opus-4-8}"
 S3="${SLOT3:-claude-opus-4-7}"
+# 独立服务商（另一个假上游端口），整流组合路径专用 —— 不与别的用例共享能力缓存
+S4="${SLOT4:-claude-opus-4-6}"
 
 # 1) /v1/models
 curl -s "$B/v1/models" | python3 -m json.tool --sort-keys > "$OUT/models.json"
@@ -92,7 +94,8 @@ curl -s -o /dev/null -X POST "$B/v1/messages" \
   -H "content-type: application/json" \
   -d '{"model":"'"$S0"'","max_tokens":1,"metadata":{"user_id":"health-check"},"messages":[{"role":"user","content":"."}]}'
 
-# ---- 以下用例会污染服务商能力缓存（§3.11.1），必须放在最后 ----
+# ---- 以下用例会往服务商能力缓存里写东西（§3.11.4），必须放在最后 ----
+#      chain-reject 成功后会标记「不接受 thinking 块」，会让后面的 sig-reject 少一次转发
 
 # 16) 上游要求 thinking budget ≥ 1024 → 抬到 32000 重试（§3.11.2）
 curl -s -o "$OUT/budget.body" -w "%{http_code}" -X POST "$B/v1/messages" \
@@ -114,6 +117,16 @@ curl -s -o "$OUT/rectify.body" -w "%{http_code}" -X POST "$B/v1/messages" \
 curl -s -o /dev/null -X POST "$B/v1/messages" \
   -H "content-type: application/json" \
   -d '{"model":"'"$S0"'","max_tokens":5,"output_config":{"effort":"max"},"metadata":{"user_id":"effort-reject-2"},"messages":[{"role":"user","content":"hi"}]}'
+
+# 20) 连环整流：budget 被拒 → 修好后又被 thinking 块签名拒（§3.11 组合路径）
+curl -s -o "$OUT/chain.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S4"'","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":100},"metadata":{"user_id":"chain-reject"},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"s"},{"type":"text","text":"y"}]}]}' > "$OUT/chain.status"
+
+# 21) 怎么改都拒 → 防循环上限：最多整流 2 次（共 3 次转发），且原样返回**最初**的错误
+curl -s -o "$OUT/loop.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S4"'","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":100},"output_config":{"effort":"max"},"metadata":{"user_id":"loop-reject"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/loop.status"
 
 sleep 0.3
 echo "driven: $OUT"

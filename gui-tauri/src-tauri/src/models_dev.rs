@@ -189,14 +189,16 @@ pub fn apply_catalog(config: &mut Config, catalog: &Catalog) -> usize {
             if m.name.is_empty() {
                 continue;
             }
-            let found = lookup(catalog, &url, &m.name);
-            let (pricing, context) = match found {
-                Some(info) => (Some(info.pricing), info.context),
-                None => (None, None),
+            // ⚠️ 查不到就**保持原值**，绝不清空。
+            // models.dev 某次返回空表 / 改了结构 / 下掉一个模型条目，都会让这里查不到；
+            // 一旦清空，费率行随之消失，引擎立刻退回按 Anthropic 官方价估算 —— 假账单。
+            // 价格略旧远好过假账单。（改了模型名的情形由 preserve_synced_pricing 负责丢弃。）
+            let Some(info) = lookup(catalog, &url, &m.name) else {
+                continue;
             };
-            if m.pricing_synced != pricing || m.context_limit != context {
-                m.pricing_synced = pricing;
-                m.context_limit = context;
+            if m.pricing_synced.as_ref() != Some(&info.pricing) || m.context_limit != info.context {
+                m.pricing_synced = Some(info.pricing);
+                m.context_limit = info.context;
                 changed += 1;
             }
         }
@@ -207,8 +209,13 @@ pub fn apply_catalog(config: &mut Config, catalog: &Catalog) -> usize {
 /// 拉取 + 解析。**不碰配置** —— 网络往返期间用户可能正在改配置，
 /// 落盘一律等回到主流程、重新取写锁之后再做（见 commands::sync_pricing）。
 pub async fn fetch_catalog(client: &reqwest::Client) -> Result<Catalog, String> {
+    fetch_catalog_from(client, MODELS_DEV_API_URL).await
+}
+
+/// 同上，地址可注入（单测用）。
+pub async fn fetch_catalog_from(client: &reqwest::Client, url: &str) -> Result<Catalog, String> {
     let resp = client
-        .get(MODELS_DEV_API_URL)
+        .get(url)
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
@@ -552,6 +559,51 @@ mod tests {
         preserve_synced_pricing(&mut incoming, &current);
         assert_eq!(incoming.providers[0].models[0].pricing_synced, None);
         assert_eq!(incoming.providers[0].models[1].pricing_synced, Some(synced));
+    }
+
+    #[tokio::test]
+    async fn unreachable_models_dev_degrades_instead_of_breaking() {
+        // 拉不到就保持上次同步的值（降级到「价格略旧」，而不是「没有价格」）。
+        // 用一个必定连不上的地址模拟断网 / 被墙。
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(300))
+            .build()
+            .unwrap();
+        // 本机可能挂着 HTTP 代理，拿到的是 502 而不是连接被拒 —— 两种都算失败，
+        // 关键是**返回 Err 而不是 panic / 半个表**，调用方据此保持旧费率。
+        let err = fetch_catalog_from(&client, "http://127.0.0.1:1/api.json").await.unwrap_err();
+        assert!(!err.is_empty(), "失败必须带上原因，日志里要看得懂");
+    }
+
+    #[test]
+    fn garbage_payload_is_rejected_rather_than_half_parsed() {
+        assert!(parse_catalog(b"not json").is_err());
+        assert!(parse_catalog(b"[1,2,3]").is_err(), "顶层不是对象也该报错");
+        // 合法但空 → 空表，不是错误
+        assert!(parse_catalog(b"{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_catalog_never_wipes_existing_prices() {
+        // 万一 models.dev 某次返回了个空表，不能把用户已有的费率清掉
+        let synced = ModelPricing { input: Some(0.95), currency: "USD".into(), ..Default::default() };
+        let mut cfg = Config {
+            providers: vec![Provider {
+                target_url: "https://api.moonshot.cn/anthropic".into(),
+                api_key: "k".into(),
+                models: vec![ModelEntry {
+                    name: "kimi-k2.6".into(),
+                    pricing_synced: Some(synced.clone()),
+                    context_limit: Some(262_144),
+                    ..Default::default()
+                }],
+                thinking_effort: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(apply_catalog(&mut cfg, &Catalog::new()), 0, "空表不该算作变更");
+        assert_eq!(cfg.providers[0].models[0].pricing_synced, Some(synced));
+        assert_eq!(cfg.providers[0].models[0].context_limit, Some(262_144));
     }
 
     #[test]

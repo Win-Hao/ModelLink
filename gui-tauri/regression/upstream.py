@@ -68,7 +68,19 @@ class H(BaseHTTPRequestHandler):
             f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
 
         tag = ((body or {}).get("metadata") or {}).get("user_id", "")
-        if tag == "slow-stream":
+        if tag == "chain-reject":
+            # 连环拒收：先嫌 budget 太小，去掉 output_config 之前先修 budget；
+            # 修完再嫌 thinking 块签名 —— 用来验「单请求最多整流 2 次」的组合路径
+            if ((body or {}).get("thinking") or {}).get("budget_tokens", 99999) < 1024:
+                self.reply(400, REJECT_BUDGET)
+            elif has_thinking_block(body):
+                self.reply(400, REJECT_SIG)
+            else:
+                self.reply(200, OK)
+        elif tag == "loop-reject":
+            # 无论怎么改都拒 —— 验证防循环上限：最多两次整流，共三次转发
+            self.reply(400, REJECT_BUDGET)
+        elif tag == "slow-stream":
             self.silent_sse()
         elif tag.startswith("budget-reject") and \
                 ((body or {}).get("thinking") or {}).get("budget_tokens", 99999) < 1024:

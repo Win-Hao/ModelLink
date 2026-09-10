@@ -31,9 +31,12 @@ mk_home() {
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key", "models": [{"name": "real-a", "to_1m": "auto"}], "thinking_effort": ""},
     {"target_url": "http://127.0.0.1:9999/sub", "api_key": "test-key-2", "models": [{"name": "real-b", "to_1m": ""}], "thinking_effort": "off"},
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-3", "models": [{"name": "real-c", "to_1m": ""}], "thinking_effort": "high"},
-    {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-4", "models": [{"name": "real-d", "to_1m": "auto"}], "thinking_effort": "max"}
+    {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-4", "models": [{"name": "real-d", "to_1m": "auto"}], "thinking_effort": "max"},
+    {"target_url": "http://127.0.0.1:9998", "api_key": "test-key-e", "models": [{"name": "real-e", "to_1m": ""}], "thinking_effort": ""},
+    {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-5", "models": [{"name": "over-0", "to_1m": ""}, {"name": "over-1", "to_1m": ""}, {"name": "over-2", "to_1m": ""}, {"name": "over-3", "to_1m": ""}, {"name": "over-4", "to_1m": ""}, {"name": "over-5", "to_1m": ""}, {"name": "over-6", "to_1m": ""}, {"name": "over-7", "to_1m": ""}, {"name": "over-8", "to_1m": ""}, {"name": "over-9", "to_1m": ""}, {"name": "over-10", "to_1m": ""}, {"name": "over-11", "to_1m": ""}, {"name": "over-12", "to_1m": ""}, {"name": "over-13", "to_1m": ""}, {"name": "over-14", "to_1m": ""}, {"name": "over-15", "to_1m": ""}, {"name": "over-16", "to_1m": ""}, {"name": "over-17", "to_1m": ""}], "thinking_effort": ""}
   ],
-  "heartbeat_secs": 2
+  "heartbeat_secs": 2,
+  "pricing_auto_sync": false
 }
 EOF
 }
@@ -47,6 +50,8 @@ run_one() { # $1=label $2=binary $3=home
   local label="$1" bin="$2" home="$3"
   rm -f "$EQ/cap-$label.jsonl"
   python3 "$HERE/upstream.py" "$EQ/cap-$label.jsonl" 9999 & local up=$!
+  # 第二个假上游：给「整流组合路径」用例专用，免得和别的用例共享服务商能力缓存
+  python3 "$HERE/upstream.py" "$EQ/cap-$label.jsonl" 9998 & local up2=$!
   sleep 0.5
   HOME="$home" "$bin" >/dev/null 2>"$EQ/app-$label.log" & local app=$!
   wait_port
@@ -54,17 +59,19 @@ run_one() { # $1=label $2=binary $3=home
     # v1 认的是 2.0 的 legacy 槽位池
     SLOT0=claude-3-opus-latest SLOT1=claude-3-5-sonnet-latest \
     SLOT2=claude-3-sonnet-20240229 SLOT3=claude-3-haiku-20240307 \
+    SLOT4=claude-3-5-haiku-latest \
       bash "$HERE/drive.sh" "$EQ/out-$label" >/dev/null
   else
     bash "$HERE/drive.sh" "$EQ/out-$label" >/dev/null
   fi
   kill "$app" 2>/dev/null; wait "$app" 2>/dev/null || true
   kill "$up" 2>/dev/null; wait "$up" 2>/dev/null || true
+  kill "$up2" 2>/dev/null; wait "$up2" 2>/dev/null || true
   sleep 0.5
 }
 
 # 防呆：5678/9999 必须空闲（正在跑的 ModelLink 会让 wait_port 等到错误对象）
-for p in 5678 9999; do
+for p in 5678 9999 9998; do
   if lsof -nP -i ":$p" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "✗ 端口 $p 被占用（先退出正在运行的 ModelLink / 其他占用者再跑）" >&2
     exit 1
@@ -97,6 +104,8 @@ DIVERGE = {
     "unmapped":              "§3.3 未映射槽位不再静默回落",
     "slow-stream":           "§3.2 沉默的流式上游：新版插心跳，v1 纯直通",
     "title-gen":             "§5.5.4 标题生成降到最省档",
+    "chain-reject":          "§3.11 两个整流器在同一请求里连续触发",
+    "loop-reject":           "§3.11 防循环上限：最多整流 2 次",
     "budget-reject":         "§3.11.2 budget 下限 → 抬到 32000 重试",
     "sig-reject":            "§3.11.3 thinking 块签名 → 剥掉后重试",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
@@ -175,6 +184,27 @@ recs = new.get(t, [])
 check(t, len(recs) == 2 and all("metadata" in r.get("body", {}) for r in recs),
       "请求体原样转发（心跳只加在响应侧）")
 
+# §3.11 组合路径：两个整流器在同一请求里先后触发
+t = "chain-reject"
+recs = new.get(t, [])
+ok = len(recs) == 3
+if ok:
+    b1, b2, b3 = (r["body"] for r in recs)
+    ok = (b1["thinking"]["budget_tokens"] == 100                      # 原样
+          and b2["thinking"]["budget_tokens"] == 32000                # 修了 budget
+          and any(blk.get("type") == "thinking"
+                  for m in b2["messages"] if isinstance(m.get("content"), list)
+                  for blk in m["content"])                            # 此时块还在
+          and all(blk.get("type") != "thinking"
+                  for m in b3["messages"] if isinstance(m.get("content"), list)
+                  for blk in m["content"]))                           # 第三次才剥块
+check(t, ok, "三次转发：budget → thinking 块，两个整流器依次生效")
+
+# §3.11 防循环：最多整流 2 次 → 至多 3 次转发
+t = "loop-reject"
+recs = new.get(t, [])
+check(t, len(recs) == 3, f"怎么改都拒时只转发 3 次（实得 {len(recs)}）")
+
 # §3.11.2 budget 下限：抬到 32000，且 max_tokens 一并提到 64000（budget 必须更小）
 t = "budget-reject"
 recs = new.get(t, [])
@@ -241,6 +271,16 @@ if [ "$(cat "$EQ/out-new/rectify.status")" = "200" ] && grep -q '"text": *"ok"\|
 else
   echo "✗ 整流后响应异常: $(cat "$EQ/out-new/rectify.status") $(cat "$EQ/out-new/rectify.body")"; fail=1
 fi
+if [ "$(cat "$EQ/out-new/chain.status")" = "200" ]; then
+  echo "✓ 连环整流后对下游返回 200"
+else
+  echo "✗ 连环整流失败: $(cat "$EQ/out-new/chain.status")"; fail=1
+fi
+if [ "$(cat "$EQ/out-new/loop.status")" = "400" ] && grep -q "尝试过的自动修复" "$EQ/out-new/loop.body"; then
+  echo "✓ 整流救不回来时原样返回最初的错误，并附上尝试过的修复"
+else
+  echo "✗ 防循环路径的响应不对: $(cat "$EQ/out-new/loop.status") $(cat "$EQ/out-new/loop.body")"; fail=1
+fi
 for f in budget sig; do
   if [ "$(cat "$EQ/out-new/$f.status")" = "200" ]; then
     echo "✓ $f 整流后对下游返回 200"
@@ -300,16 +340,32 @@ POOL = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7"
 o = json.load(open(eq / "out-old" / "models.json"))["data"]
 n = json.load(open(eq / "out-new" / "models.json"))["data"]
 fails = 0
-if [m["display_name"] for m in o] != [m["display_name"] for m in n]:
-    print("✗ 模型映射顺序与 v1 不一致"); fails += 1
+# v1 封顶 8 个模型、新版 20（§3.6 有意扩容）→ 只比对 v1 能表达的那一段
+o_names = [m["display_name"] for m in o]
+n_names = [m["display_name"] for m in n]
+if n_names[: len(o_names)] != o_names:
+    print("✗ 前 8 个槽位的映射顺序与 v1 不一致")
+    print(f"    old={o_names}\n    new={n_names[: len(o_names)]}")
+    fails += 1
+elif len(n_names) <= len(o_names):
+    print(f"✗ 新版没有超出 v1 的 8 槽位上限（{len(n_names)} 条）"); fails += 1
 else:
-    print(f"✓ 模型映射顺序与 v1 一致（{len(n)} 条）")
+    print(f"✓ 前 {len(o_names)} 条映射与 v1 一致，且已扩到 {len(n_names)} 条")
 for m in n:
     slot = m["id"].removesuffix("[1m]")
     if slot not in POOL and not slot.startswith("claude-ml-"):
         print(f"✗ 槽位 {slot} 不在 2.1 槽位池里"); fails += 1
 if not fails:
     print("✓ 槽位全部来自 2.1 新池子")
+
+# §3.6 溢出层：配置里有 22 个模型，应当正好取前 20 个，第 9 个起走 claude-ml-{n}
+slots = [m["id"] for m in n if not m["id"].endswith("[1m]")]
+if len(slots) != 20:
+    print(f"✗ 应封顶 20 个槽位，实得 {len(slots)}"); fails += 1
+elif slots[:8] != POOL or slots[8] != "claude-ml-1" or slots[19] != "claude-ml-12":
+    print(f"✗ 溢出层分配不对: {slots}"); fails += 1
+else:
+    print("✓ 封顶 20 槽位，第 9 个起走 claude-ml-{n} 溢出层")
 sys.exit(1 if fails else 0)
 PY
 then :; else fail=1; fi

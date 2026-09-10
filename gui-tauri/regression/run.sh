@@ -194,28 +194,42 @@ echo "=== DIFF 响应（状态码/透传体/404/502 话术） ==="
 for f in r1.status r1.body notfound.status notfound.body nomodel.status nomodel.body; do
   if diff "$EQ/out-old/$f" "$EQ/out-new/$f" >/dev/null; then echo "✓ $f"; else echo "✗ $f"; fail=1; fi
 done
-echo "=== 网关写入对比（Claude-3p，红线 #3；labelOverride 为 2026-07-14 拍板例外） ==="
+echo "=== 网关写入对比（Claude-3p，红线 #3） ==="
 if python3 - "$EQ" <<'PY'
 import json, sys, pathlib
 eq = pathlib.Path(sys.argv[1])
 base = "Library/Application Support/Claude-3p"
 fails = 0
+
+# 新版比 v1 多写的键 —— 剔除后其余必须逐字节一致
+# labelOverride: 2026-07-14 拍板例外；后两个: 2.1-A §3.4
+ADDED_KEYS = {"chatTabEnabled": True, "disableDeploymentModeChooser": True}
+
 cases = [
     ("configLibrary/a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4.json", True),
     ("configLibrary/_meta.json", False),
     ("claude_desktop_config.json", False),
 ]
-for rel, allow_label in cases:
+for rel, is_gateway in cases:
     o = json.load(open(eq / "home-old" / base / rel))
     n = json.load(open(eq / "home-new" / base / rel))
-    if allow_label:
+    if is_gateway:
         for m in n.get("inferenceModels", []):
             if m.pop("labelOverride", None) is None:
                 print(f"✗ {rel}: 新版条目缺 labelOverride"); fails += 1
+        for k, want in ADDED_KEYS.items():
+            if n.pop(k, None) != want:
+                print(f"✗ {rel}: 缺 {k}={want}（§3.4）"); fails += 1
+            elif k in o:
+                print(f"✗ {rel}: v1 竟然也写了 {k}?"); fails += 1
+        # v1 从不写这两个键 → 用户装完 Chat 页是关的，这正是 §3.4 要修的
     if o == n:
-        print(f"✓ {rel}" + ("（剔除 labelOverride 后与 v1 一致）" if allow_label else ""))
+        print(f"✓ {rel}" + ("（剔除新增键后与 v1 一致）" if is_gateway else ""))
     else:
-        print(f"✗ {rel} 结构不一致"); fails += 1
+        print(f"✗ {rel} 结构不一致")
+        print(f"    old={json.dumps(o, ensure_ascii=False, sort_keys=True)}")
+        print(f"    new={json.dumps(n, ensure_ascii=False, sort_keys=True)}")
+        fails += 1
 sys.exit(1 if fails else 0)
 PY
 then :; else fail=1; fi

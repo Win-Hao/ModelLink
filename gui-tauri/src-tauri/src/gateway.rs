@@ -4,6 +4,8 @@
 //! configLibrary 固定 UUID `a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4`、_meta.json 合并规则、
 //! claude_desktop_config.json 的 deploymentMode="3p"、Windows 的 MSIX/LOCALAPPDATA/APPDATA
 //! 多路径 fallback 与 developer_settings/config.json 写入。禁止顺手优化。
+//!
+//! 写入方式一律是「读出已有 JSON → 只改自己那几个键 → 写回」，不清空用户其它字段。
 
 use std::path::PathBuf;
 
@@ -59,6 +61,26 @@ pub fn claude_3p_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// 网关配置里 ModelLink 负责的那几个键 —— 启动自动配置与「应用」按钮的唯一写入点。
+/// 调用方先读出已有 JSON，这里只改这几个键，其余字段原样保留（用户在 Claude Desktop
+/// 里的其它设置不受影响）。
+fn write_gateway_keys(existing: &mut serde_json::Value, port: u16) {
+    existing["coworkEgressAllowedHosts"] = serde_json::json!(["*"]);
+    existing["inferenceProvider"] = serde_json::json!("gateway");
+    existing["inferenceGatewayBaseUrl"] = serde_json::json!(format!("http://127.0.0.1:{}", port));
+    existing["inferenceGatewayApiKey"] = serde_json::json!("proxy");
+    // ⚠️ `sso` / `auto` 两个取值 2026-10-07 失效；ModelLink 固定写 bearer，不受影响。
+    existing["inferenceGatewayAuthScheme"] = serde_json::json!("bearer");
+    // 2.1-A §3.4 补两个一直没写的键：
+    // Claude Desktop 里 coworkTabEnabled / isClaudeCodeForDesktopEnabled 都有
+    // default:true，唯独 chatTabEnabled 没有 —— 不写就是关的，用户装完看不到 Chat 页。
+    // （1.13576.0 起支持；低于该版本的老客户端会忽略未知键。按版本门槛跳过写入
+    //   属于 §3.8 版本自适应，排在 E 批。）
+    existing["chatTabEnabled"] = serde_json::json!(true);
+    // 免去每次启动都要选部署模式
+    existing["disableDeploymentModeChooser"] = serde_json::json!(true);
+}
+
 pub fn ensure_claude_desktop_gateway(port: u16) {
     let claude_dir = match claude_3p_dir() {
         Some(d) => d,
@@ -99,11 +121,7 @@ pub fn ensure_claude_desktop_gateway(port: u16) {
         serde_json::json!({})
     };
 
-    existing["coworkEgressAllowedHosts"] = serde_json::json!(["*"]);
-    existing["inferenceProvider"] = serde_json::json!("gateway");
-    existing["inferenceGatewayBaseUrl"] = serde_json::json!(format!("http://127.0.0.1:{}", port));
-    existing["inferenceGatewayApiKey"] = serde_json::json!("proxy");
-    existing["inferenceGatewayAuthScheme"] = serde_json::json!("bearer");
+    write_gateway_keys(&mut existing, port);
     if existing.get("inferenceModels").is_none() {
         existing["inferenceModels"] = serde_json::json!([]);
     }
@@ -293,11 +311,7 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
         serde_json::json!({})
     };
 
-    existing["coworkEgressAllowedHosts"] = serde_json::json!(["*"]);
-    existing["inferenceProvider"] = serde_json::json!("gateway");
-    existing["inferenceGatewayBaseUrl"] = serde_json::json!(format!("http://127.0.0.1:{}", config.port));
-    existing["inferenceGatewayApiKey"] = serde_json::json!("proxy");
-    existing["inferenceGatewayAuthScheme"] = serde_json::json!("bearer");
+    write_gateway_keys(&mut existing, config.port);
     existing["inferenceModels"] = serde_json::json!(models);
 
     let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
@@ -491,6 +505,42 @@ pub fn restart_claude_desktop() {
 mod tests {
     use super::*;
     use crate::config::{flatten_config, ModelEntry, Provider};
+
+    /// §3.4：这七个键就是 ModelLink 写进网关配置的全部内容 —— 少一个都有用户可见的
+    /// 后果（chatTabEnabled 不写 = Chat 页是关的）。改这张表要同步 docs。
+    #[test]
+    fn gateway_keys_cover_the_seven_modellink_owns() {
+        let mut existing = serde_json::json!({});
+        write_gateway_keys(&mut existing, 5678);
+        assert_eq!(
+            existing,
+            serde_json::json!({
+                "coworkEgressAllowedHosts": ["*"],
+                "inferenceProvider": "gateway",
+                "inferenceGatewayBaseUrl": "http://127.0.0.1:5678",
+                "inferenceGatewayApiKey": "proxy",
+                "inferenceGatewayAuthScheme": "bearer",
+                "chatTabEnabled": true,
+                "disableDeploymentModeChooser": true,
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_keys_preserve_other_user_fields() {
+        let mut existing = serde_json::json!({
+            "someUserSetting": 42,
+            "inferenceModels": [{"name": "claude-3-opus-latest"}],
+            "chatTabEnabled": false,
+        });
+        write_gateway_keys(&mut existing, 5679);
+        // 用户其它字段原样保留
+        assert_eq!(existing["someUserSetting"], 42);
+        assert_eq!(existing["inferenceModels"][0]["name"], "claude-3-opus-latest");
+        // 自己负责的键覆盖为新值
+        assert_eq!(existing["chatTabEnabled"], true);
+        assert_eq!(existing["inferenceGatewayBaseUrl"], "http://127.0.0.1:5679");
+    }
 
     #[test]
     fn inference_models_carry_label_override_and_1m() {

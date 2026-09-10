@@ -148,6 +148,18 @@ pub struct Config {
     /// 上次成功同步的时间（Unix 秒，字符串）。空 = 从没同步过。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pricing_synced_at: String,
+    /// 2.1-D 新增（§3.7）：用户自定义的组织级指令，原样写入 `organizationInstructions`，
+    /// ModelLink 不拼接任何自动生成文本。上限 3000 字符（app 硬限制）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub org_instructions: String,
+    /// 2.1-D 新增（§3.7）：在指令前追加真实模型说明（槽位映射）。
+    ///
+    /// 默认**开**：§5.5.1 抓包推翻了原先的乐观结论 —— Chat 模式跑的是 Claude Code
+    /// 引擎，系统提示词第 [1] 块是第二人称角色断言（"You are a Claude agent…"），
+    /// 比 §1.2 实验里的第三人称能力描述强硬得多，实测 Kimi 在 Chat 里会自称
+    /// 「我是 Claude，由 Anthropic 开发」。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub org_identity_note: bool,
     /// 2.1-C 新增（§3.2）：流式响应的 SSE 心跳间隔（秒）。0 = 关闭。
     /// 上游沉默超过这个时长就往下游写一行 `: ping`，配合
     /// `inferenceStreamIdleTimeoutSec` 治长生成断流。
@@ -167,6 +179,8 @@ impl Default for Config {
             usd_rate: DEFAULT_USD_RATE,
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
+            org_instructions: String::new(),
+            org_identity_note: true,
             heartbeat_secs: DEFAULT_HEARTBEAT_SECS,
         }
     }
@@ -202,7 +216,23 @@ pub struct ModelEntry {
     /// 同步值是美元、手填可能是人民币，混在一行里就是两种币种相加。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing_synced: Option<ModelPricing>,
+    /// 2.1-D 新增（§3.5）：该条为默认（首条）模型时，1M 变体成为选择器默认项。
+    /// 无 `to_1m` 时无效（app 内该字段的 show 谓词是 `!!e.supports1m`）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prefer_1m: bool,
+    /// 2.1-D 新增（§3.5）：层级别名，把裸别名（如 `opus`）pin 到这条。
+    /// 取值 sonnet / opus / haiku / fable / mythos，空 = 不设。
+    /// opus 与 fable 还带 refusal fallback 链路。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family_tier: String,
+    /// 2.1-D 新增（§3.5）：同层级有多条时，指定哪条接管别名（否则第一条胜出）。
+    /// 无 `family_tier` 时无效。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub family_default: bool,
 }
+
+/// `anthropicFamilyTier` 的合法取值（app.asar 实测 `Ba` 数组）。
+pub const FAMILY_TIERS: &[&str] = &["sonnet", "opus", "haiku", "fable", "mythos"];
 
 impl ModelEntry {
     /// 实际写进网关的费率：手填优先，否则用同步值。
@@ -377,6 +407,9 @@ pub struct FlatEntry {
     pub key: String,
     pub thinking_effort: String,
     pub pricing: Option<ModelPricing>,
+    pub prefer_1m: bool,
+    pub family_tier: String,
+    pub family_default: bool,
 }
 
 pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
@@ -393,6 +426,9 @@ pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
                     key: provider.api_key.clone(),
                     thinking_effort: provider.thinking_effort.clone(),
                     pricing: m.effective_pricing().cloned(),
+                    prefer_1m: m.prefer_1m,
+                    family_tier: m.family_tier.clone(),
+                    family_default: m.family_default,
                 });
                 count += 1;
             }
@@ -843,6 +879,7 @@ mod tests {
             to_1m: String::new(),
             pricing: Some(manual.clone()),
             pricing_synced: Some(synced.clone()),
+            ..Default::default()
         };
         assert_eq!(m.effective_pricing(), Some(&manual));
 

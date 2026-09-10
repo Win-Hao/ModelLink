@@ -24,8 +24,9 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { testProvider, type ModelPricing } from "@/lib/ipc";
+import { testProvider, type ModelEntry, type ModelPricing } from "@/lib/ipc";
 import {
+  FAMILY_TIERS,
   MAX_MODELS,
   THINKING_LABELS,
   getPresetModels,
@@ -119,6 +120,76 @@ function PricingPanel({
   );
 }
 
+/** 模型条目的进阶字段（§3.5）：层级别名 + 1M 默认。 */
+function TierPanel({
+  entry,
+  onChange,
+}: {
+  entry: ModelEntry;
+  onChange: (fn: (m: ModelEntry) => void) => void;
+}) {
+  const tier = entry.family_tier ?? "";
+  return (
+    <div className="mb-1 ml-1 mr-1 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[9px] border border-dashed bg-background px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[10.5px] text-muted-foreground">层级别名</span>
+        <Select
+          value={tier === "" ? "none" : tier}
+          onValueChange={(v) =>
+            onChange((m) => {
+              m.family_tier = v === "none" ? "" : v;
+              if (v === "none") m.family_default = false;
+            })
+          }
+        >
+          <SelectTrigger
+            size="sm"
+            className="h-[26px] gap-1.5 rounded-[7px] border-input bg-card px-2 text-[11px] shadow-none dark:bg-card"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none" className="text-xs">
+              不设
+            </SelectItem>
+            {FAMILY_TIERS.map((t) => (
+              <SelectItem key={t} value={t} className="text-xs">
+                {t}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* app 内该字段的 show 谓词是 !!e.anthropicFamilyTier */}
+      {tier !== "" && (
+        <label className="flex items-center gap-1.5">
+          <Switch
+            checked={!!entry.family_default}
+            onCheckedChange={(ck) => onChange((m) => (m.family_default = ck))}
+          />
+          <span className="text-[10.5px] text-muted-foreground">该层级默认</span>
+        </label>
+      )}
+
+      {/* prefer1m 的 show 谓词是 !!e.supports1m */}
+      {!!entry.to_1m && (
+        <label className="flex items-center gap-1.5">
+          <Switch
+            checked={!!entry.prefer_1m}
+            onCheckedChange={(ck) => onChange((m) => (m.prefer_1m = ck))}
+          />
+          <span className="text-[10.5px] text-muted-foreground">默认用 1M 变体</span>
+        </label>
+      )}
+
+      <span className="w-full text-[10px] text-faint">
+        层级别名把 Claude 里的裸称呼（如「opus」）指到这条；opus / fable 还带拒答回退链路。留空即不参与。
+      </span>
+    </div>
+  );
+}
+
 /** 服务商编辑器（design.md §6.2 右栏）：一次只编辑一个服务商。 */
 export function ProviderEditor({ index }: { index: number }) {
   const {
@@ -135,6 +206,8 @@ export function ProviderEditor({ index }: { index: number }) {
   const [testing, setTesting] = useState(false);
   /** 展开费率面板的模型下标（一次只开一个）。 */
   const [pricingOpen, setPricingOpen] = useState<number | null>(null);
+  /** 展开层级面板的模型下标。 */
+  const [tierOpen, setTierOpen] = useState<number | null>(null);
 
   // 预设引导流：跳入本页时聚焦密钥输入框
   const keyRef = useRef<HTMLInputElement>(null);
@@ -150,6 +223,7 @@ export function ProviderEditor({ index }: { index: number }) {
   useEffect(() => {
     setShowKey(false);
     setPricingOpen(null);
+    setTierOpen(null);
   }, [index]);
 
   const p = draft?.providers[index];
@@ -294,7 +368,14 @@ export function ProviderEditor({ index }: { index: number }) {
               >
                 费率
               </button>
-              <span className="mono max-w-[150px] flex-none truncate text-[10px] text-faint">
+              <button
+                onClick={() => setTierOpen(tierOpen === mi ? null : mi)}
+                className="flex-none rounded-[5px] border px-1.5 py-px text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+                title="层级别名 / 1M 默认"
+              >
+                层级
+              </button>
+              <span className="mono max-w-[110px] flex-none truncate text-[10px] text-faint">
                 {slot ? `→ ${slot}` : ""}
               </span>
               <button
@@ -309,6 +390,16 @@ export function ProviderEditor({ index }: { index: number }) {
                 <X size={13} />
               </button>
             </div>
+            {tierOpen === mi && (
+              <TierPanel
+                entry={m}
+                onChange={(fn) =>
+                  updateDraft((c) => {
+                    fn(c.providers[index].models[mi]);
+                  })
+                }
+              />
+            )}
             {pricingOpen === mi && (
               <PricingPanel
                 pricing={m.pricing}

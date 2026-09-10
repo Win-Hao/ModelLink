@@ -10,7 +10,12 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import { DEFAULT_HEARTBEAT_SECS, DEFAULT_USD_RATE, formatAppliedAt } from "@/lib/presets";
+import {
+  DEFAULT_HEARTBEAT_SECS,
+  DEFAULT_USD_RATE,
+  ORG_INSTRUCTIONS_MAX,
+  formatAppliedAt,
+} from "@/lib/presets";
 import { guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
@@ -78,6 +83,8 @@ export function SettingsPage() {
     }
     if (n !== cur) updateDraft((c) => (c.usd_rate = n));
   };
+
+  const orgLen = (draft?.org_instructions ?? "").length;
 
   // 心跳间隔（本地编辑态，blur/Enter 提交）
   const [hbText, setHbText] = useState("");
@@ -180,6 +187,51 @@ export function SettingsPage() {
                 disabled={switching}
                 inputMode="numeric"
                 className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
+              />
+            </div>
+          </div>
+
+          {/* 组织级指令（2.1-D §3.7） */}
+          <div className="flex flex-col gap-2 border-t px-4 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-[13px] font-medium">组织级指令</div>
+                <div className="mt-px text-[11px] text-faint">
+                  追加到 Chat / Cowork / Code 的系统提示词（含它们派生的子 agent）。Claude
+                  会告诉模型「这来自管理员，优先于个人偏好」—— 是引导，不是强制约束。
+                </div>
+              </div>
+              <span className="mono flex-none pt-0.5 text-[10.5px] text-faint">
+                {orgLen} / {ORG_INSTRUCTIONS_MAX}
+              </span>
+            </div>
+            <textarea
+              value={draft?.org_instructions ?? ""}
+              onChange={(e) =>
+                updateDraft((c) => {
+                  c.org_instructions = e.target.value.slice(0, ORG_INSTRUCTIONS_MAX);
+                })
+              }
+              disabled={!draft}
+              rows={3}
+              placeholder="例：统一用简体中文回答；代码一律带类型注解。"
+              className="w-full resize-y rounded-[9px] border border-input bg-input-bg px-[11px] py-2 text-xs leading-[1.6] outline-none placeholder:text-faint focus-visible:border-ring dark:bg-input-bg"
+            />
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-[11px] text-faint">
+                在指令前追加槽位映射说明
+                <br />
+                Chat 模式跑的是 Claude Code 引擎，系统提示词里有一句第二人称的「You are a Claude
+                agent」，实测会让部分国产模型自称 Claude；这段映射把真实身份摊给模型。
+              </div>
+              <Switch
+                checked={draft?.org_identity_note ?? true}
+                disabled={!draft}
+                onCheckedChange={(ck) =>
+                  updateDraft((c) => {
+                    c.org_identity_note = ck;
+                  })
+                }
               />
             </div>
           </div>

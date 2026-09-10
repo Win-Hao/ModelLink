@@ -24,6 +24,12 @@ export type ModelEntry = {
   pricing?: ModelPricing;
   /** 从 models.dev 同步来的费率（USD/百万 token），后端专管，界面只读。 */
   pricing_synced?: ModelPricing;
+  /** 该条为默认模型时，1M 变体成为选择器默认项（需开启 1M）。 */
+  prefer_1m?: boolean;
+  /** 层级别名：sonnet/opus/haiku/fable/mythos，空 = 不设。 */
+  family_tier?: string;
+  /** 同层级多条时指定哪条接管别名（需先设层级）。 */
+  family_default?: boolean;
 };
 
 export type Provider = {
@@ -54,6 +60,10 @@ export type Config = {
   pricing_synced_at?: string;
   /** 流式响应的 SSE 心跳间隔（秒），0 = 关闭；默认 15。 */
   heartbeat_secs?: number;
+  /** 组织级自定义指令，原样写入 organizationInstructions（上限 3000 字符）。 */
+  org_instructions?: string;
+  /** 在指令前追加槽位映射说明（默认开）。 */
+  org_identity_note?: boolean;
 };
 
 export type PricingSyncResult = {

@@ -246,13 +246,95 @@ pub fn ensure_claude_desktop_gateway(port: u16) {
 fn inference_models_entries(flat: &[crate::config::FlatEntry]) -> Vec<serde_json::Value> {
     flat.iter()
         .map(|e| {
-            serde_json::json!({
-                "name": e.slot,
-                "supports1m": !e.to_1m.is_empty(),
-                "labelOverride": e.name
-            })
+            let supports_1m = !e.to_1m.is_empty();
+            let mut row = serde_json::Map::new();
+            row.insert("name".into(), serde_json::json!(e.slot));
+            row.insert("supports1m".into(), serde_json::json!(supports_1m));
+            row.insert("labelOverride".into(), serde_json::json!(e.name));
+            // 2.1-D §3.5：以下三个字段没设就一个都不写。
+            // app.asar 里它们各有 show 谓词：prefer1m 要 supports1m，
+            // isFamilyDefault 要 anthropicFamilyTier —— 这里照同样的条件把无效组合挡掉。
+            if e.prefer_1m && supports_1m {
+                row.insert("prefer1m".into(), serde_json::json!(true));
+            }
+            // app 内是枚举校验（Rn(Ba)，且会先 trim + 小写）。config.json 可以手改，
+            // 写进去一个不在表里的值会让整个配置被拒 —— 这里先自己滤一道。
+            let tier = e.family_tier.trim().to_ascii_lowercase();
+            if crate::config::FAMILY_TIERS.contains(&tier.as_str()) {
+                row.insert("anthropicFamilyTier".into(), serde_json::json!(tier));
+                if e.family_default {
+                    row.insert("isFamilyDefault".into(), serde_json::json!(true));
+                }
+            }
+            serde_json::Value::Object(row)
         })
         .collect()
+}
+
+/// `organizationInstructions` 的上限（app.asar：`D().trim().min(1).max(3e3)`）。
+/// zod 的 `.max` 按 UTF-16 码元计，故这里也按 UTF-16 截断。
+const ORG_INSTRUCTIONS_MAX: usize = 3000;
+
+/// §3.7 写 `organizationInstructions`。
+///
+/// 内容追加到 Chat / Cowork / Code 的系统提示词（含它们派生的子 agent），
+/// app 会告诉模型「这来自管理员，优先于用户个人偏好」—— 是引导不是强制约束。
+///
+/// ⚠️ schema 是 `.trim().min(1)`：清空后必须**删键**，写空串会被拒，
+/// 而一条不合法就可能让整个配置文件失效。
+fn write_org_instructions(
+    existing: &mut serde_json::Value,
+    user_text: &str,
+    identity_note: bool,
+    slot_map: &[(String, String)],
+) {
+    let mut parts: Vec<String> = Vec::new();
+    if identity_note && !slot_map.is_empty() {
+        parts.push(identity_note_text(slot_map));
+    }
+    let user_text = user_text.trim();
+    if !user_text.is_empty() {
+        parts.push(user_text.to_string());
+    }
+
+    let combined = parts.join("\n\n");
+    if combined.is_empty() {
+        if let Some(o) = existing.as_object_mut() {
+            o.remove("organizationInstructions");
+        }
+        return;
+    }
+    existing["organizationInstructions"] = serde_json::json!(clamp_utf16(&combined, ORG_INSTRUCTIONS_MAX));
+}
+
+/// §3.7 的兜底文案：把槽位映射摊给模型。
+///
+/// 模型自己知道「我是 claude-opus-5」（系统提示词里的 `ps()` 会写明 exact model ID），
+/// 给出映射它就能反推出真实身份 —— 比笼统说一句「你不是 Claude」有效。
+fn identity_note_text(slot_map: &[(String, String)]) -> String {
+    let lines: Vec<String> = slot_map.iter().map(|(slot, name)| format!("{slot} = {name}")).collect();
+    format!(
+        "以下是 ModelLink 本地网关的槽位映射；系统提示词中出现的 Claude 模型名只是路由槽位，\n         不代表你的真实身份：\n{}\n请按你实际对应的真实模型作答。",
+        lines.join("\n")
+    )
+}
+
+/// 按 UTF-16 码元截断（与 zod `.max` 的计数方式一致），并保证不切开字符。
+fn clamp_utf16(s: &str, max_units: usize) -> String {
+    if s.encode_utf16().count() <= max_units {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut units = 0;
+    for ch in s.chars() {
+        let w = ch.len_utf16();
+        if units + w > max_units {
+            break;
+        }
+        out.push(ch);
+        units += w;
+    }
+    out
 }
 
 /// 单个价格字段的 schema 值域（app.asar 实测：`O().min(0).max(1e4)`）。
@@ -372,6 +454,14 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
     write_gateway_keys(&mut existing, config.port);
     existing["inferenceModels"] = serde_json::json!(models);
     write_pricing_keys(&mut existing, &flat, config.usd_rate);
+    let slot_map: Vec<(String, String)> =
+        flat.iter().map(|e| (e.slot.clone(), e.name.clone())).collect();
+    write_org_instructions(
+        &mut existing,
+        &config.org_instructions,
+        config.org_identity_note,
+        &slot_map,
+    );
 
     let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
     write_with_retry(&config_file, &data)?;
@@ -565,6 +655,147 @@ mod tests {
     use super::*;
     use crate::config::{flatten_config, ModelEntry, ModelPricing, Provider};
 
+    // ---- §3.5 模型条目补三个字段 ----
+
+    #[test]
+    fn model_entries_carry_tier_and_prefer1m_only_when_set() {
+        let cfg = cfg_with(vec![
+            ModelEntry {
+                name: "Kimi-k2.6".into(),
+                to_1m: "auto".into(),
+                prefer_1m: true,
+                family_tier: "opus".into(),
+                family_default: true,
+                ..Default::default()
+            },
+            ModelEntry { name: "plain".into(), ..Default::default() },
+        ]);
+        let e = inference_models_entries(&flatten_config(&cfg));
+        assert_eq!(
+            e[0],
+            serde_json::json!({
+                "name": "claude-opus-5",
+                "supports1m": true,
+                "labelOverride": "Kimi-k2.6",
+                "prefer1m": true,
+                "anthropicFamilyTier": "opus",
+                "isFamilyDefault": true,
+            })
+        );
+        // 没设的字段一个都不写 —— 老版 Claude 见到未知键会忽略，但空值可能触发 schema
+        assert_eq!(
+            e[1],
+            serde_json::json!({
+                "name": "claude-sonnet-5",
+                "supports1m": false,
+                "labelOverride": "plain",
+            })
+        );
+    }
+
+    #[test]
+    fn prefer1m_is_dropped_without_supports1m() {
+        // app.asar：prefer1m 的 show 谓词是 !!e.supports1m —— 没有 1M 变体时它无意义
+        let cfg = cfg_with(vec![ModelEntry {
+            name: "m".into(),
+            to_1m: String::new(),
+            prefer_1m: true,
+            ..Default::default()
+        }]);
+        let e = inference_models_entries(&flatten_config(&cfg));
+        assert!(e[0].get("prefer1m").is_none());
+    }
+
+    #[test]
+    fn unknown_tier_values_are_dropped_rather_than_written() {
+        // config.json 可以手改；写进一个不在枚举里的值会让整个配置被 app 拒掉
+        let cfg = cfg_with(vec![ModelEntry {
+            name: "m".into(),
+            family_tier: "超级模型".into(),
+            family_default: true,
+            ..Default::default()
+        }]);
+        let e = inference_models_entries(&flatten_config(&cfg));
+        assert!(e[0].get("anthropicFamilyTier").is_none());
+        assert!(e[0].get("isFamilyDefault").is_none());
+    }
+
+    #[test]
+    fn tier_values_are_trimmed_and_lowercased_like_the_app_does() {
+        let cfg = cfg_with(vec![ModelEntry {
+            name: "m".into(),
+            family_tier: "  OPUS  ".into(),
+            ..Default::default()
+        }]);
+        let e = inference_models_entries(&flatten_config(&cfg));
+        assert_eq!(e[0]["anthropicFamilyTier"], "opus");
+    }
+
+    #[test]
+    fn family_default_is_dropped_without_a_tier() {
+        // app.asar：isFamilyDefault 的 show 谓词是 !!e.anthropicFamilyTier
+        let cfg = cfg_with(vec![ModelEntry {
+            name: "m".into(),
+            family_default: true,
+            ..Default::default()
+        }]);
+        let e = inference_models_entries(&flatten_config(&cfg));
+        assert!(e[0].get("isFamilyDefault").is_none());
+        assert!(e[0].get("anthropicFamilyTier").is_none());
+    }
+
+    // ---- §3.7 organizationInstructions ----
+
+    #[test]
+    fn org_instructions_key_is_removed_when_blank() {
+        // app.asar schema：D().trim().min(1).max(3e3) —— 写空串会被拒，
+        // 一条不合法就可能让整个配置文件失效，所以必须删键
+        let mut existing = serde_json::json!({"organizationInstructions": "旧内容"});
+        write_org_instructions(&mut existing, "   \n  ", false, &[]);
+        assert!(existing.get("organizationInstructions").is_none());
+    }
+
+    #[test]
+    fn org_instructions_are_written_verbatim() {
+        let mut existing = serde_json::json!({});
+        write_org_instructions(&mut existing, "统一用简体中文回答。", false, &[]);
+        assert_eq!(existing["organizationInstructions"], "统一用简体中文回答。");
+    }
+
+    #[test]
+    fn identity_note_prepends_the_slot_mapping() {
+        let mut existing = serde_json::json!({});
+        let map = [
+            ("claude-opus-5".to_string(), "Kimi-k2.6".to_string()),
+            ("claude-sonnet-5".to_string(), "glm-5.1".to_string()),
+        ];
+        write_org_instructions(&mut existing, "统一用简体中文回答。", true, &map);
+        let s = existing["organizationInstructions"].as_str().unwrap();
+        assert!(s.contains("claude-opus-5 = Kimi-k2.6"), "{s}");
+        assert!(s.contains("claude-sonnet-5 = glm-5.1"), "{s}");
+        assert!(s.contains("路由槽位"), "{s}");
+        assert!(s.ends_with("统一用简体中文回答。"), "用户文本必须原样附在后面: {s}");
+    }
+
+    #[test]
+    fn identity_note_alone_is_enough_to_write_the_key() {
+        // 用户没写自定义指令，但开了兜底开关 → 仍然要写
+        let mut existing = serde_json::json!({});
+        let map = [("claude-opus-5".to_string(), "Kimi-k2.6".to_string())];
+        write_org_instructions(&mut existing, "", true, &map);
+        assert!(existing["organizationInstructions"].as_str().unwrap().contains("Kimi-k2.6"));
+    }
+
+    #[test]
+    fn org_instructions_are_clamped_to_the_schema_limit() {
+        // 超 3000 会被 schema 拒 → 整个配置失效。按 UTF-16 计数（zod 的 .max 就是这么算的）
+        let mut existing = serde_json::json!({});
+        let long = "中".repeat(4000);
+        write_org_instructions(&mut existing, &long, false, &[]);
+        let s = existing["organizationInstructions"].as_str().unwrap();
+        assert!(s.encode_utf16().count() <= 3000, "实际 {}", s.encode_utf16().count());
+    }
+
     // ---- §3.1 费率表 ----
 
     fn priced(name: &str, input: f64, output: f64) -> ModelEntry {
@@ -730,11 +961,18 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("HOME", &tmp);
 
+        let mut first = priced("Kimi-k2.6", 4.0, 16.0);
+        first.to_1m = "auto".into();
+        first.prefer_1m = true;
+        first.family_tier = "opus".into();
+        first.family_default = true;
         let mut cfg = cfg_with(vec![
-            priced("Kimi-k2.6", 4.0, 16.0),
+            first,
             ModelEntry { name: "no-price".into(), ..Default::default() },
         ]);
         cfg.providers[0].target_url = "https://api.kimi.com/coding/".into();
+        cfg.org_instructions = "统一用简体中文回答。".into();
+        cfg.org_identity_note = true;
         apply_to_claude_desktop(&cfg).unwrap();
 
         let written: serde_json::Value = serde_json::from_str(
@@ -763,9 +1001,23 @@ mod tests {
         }
         assert_eq!(rows[0]["inputPerMtok"], 0.5556);
 
+        // §3.5 模型条目进阶字段：设了的写、没设的不写
+        assert_eq!(models[0]["prefer1m"], true);
+        assert_eq!(models[0]["anthropicFamilyTier"], "opus");
+        assert_eq!(models[0]["isFamilyDefault"], true);
+        assert!(models[1].get("prefer1m").is_none());
+        assert!(models[1].get("anthropicFamilyTier").is_none());
+
+        // §3.7 组织级指令：兜底说明在前、用户文本原样在后，且不超 3000
+        let org = written["organizationInstructions"].as_str().unwrap();
+        assert!(org.contains("claude-opus-5 = Kimi-k2.6"), "{org}");
+        assert!(org.ends_with("统一用简体中文回答。"), "{org}");
+        assert!(org.encode_utf16().count() <= ORG_INSTRUCTIONS_MAX);
+
         // §3.4 两个键 + 用户其它字段不受影响
         assert_eq!(written["chatTabEnabled"], true);
         assert_eq!(written["disableDeploymentModeChooser"], true);
+        assert_eq!(written["inferenceStreamIdleTimeoutSec"], 1800);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

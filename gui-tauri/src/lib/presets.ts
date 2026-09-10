@@ -7,6 +7,12 @@ import type { Config } from "@/lib/ipc";
 /** 镜像后端 config.rs::MAX_MODELS（2.1-B §3.6：8 → 20）。 */
 export const MAX_MODELS = 20;
 
+/** 镜像后端 config.rs::FAMILY_TIERS（app.asar 里的 Ba 数组，§3.5）。 */
+export const FAMILY_TIERS = ["sonnet", "opus", "haiku", "fable", "mythos"] as const;
+
+/** organizationInstructions 的硬上限（app.asar：D().trim().min(1).max(3e3)）。 */
+export const ORG_INSTRUCTIONS_MAX = 3000;
+
 /** 镜像后端 config.rs::DEFAULT_HEARTBEAT_SECS（§3.2）。 */
 export const DEFAULT_HEARTBEAT_SECS = 15;
 

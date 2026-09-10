@@ -70,6 +70,17 @@ curl -s -o "$OUT/passthrough.body" -w "%{http_code}" -X POST "$B/v1/messages" \
   -H "content-type: application/json" \
   -d '{"model":"'"$S2"'","max_tokens":5,"output_config":{"effort":"low"},"thinking":{"type":"adaptive"},"metadata":{"user_id":"slot2-passthrough"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/passthrough.status"
 
+# 14) 上游沉默 7s 的流式响应 → 期间下游应持续收到 `: ping`（§3.2）
+#     ⚠️ 2.1-C 有意不等价：v1 是纯直通，沉默期间下游一个字节都收不到。
+curl -s --no-buffer -o "$OUT/heartbeat.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":5,"stream":true,"metadata":{"user_id":"slow-stream"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/heartbeat.status"
+
+# 15) 同一个沉默上游，但非流式 → 不该插心跳（会污染 JSON）
+curl -s -o "$OUT/nostream.body" -w "%{http_code}" -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":5,"metadata":{"user_id":"slow-stream"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/nostream.status"
+
 # ---- 以下用例会污染服务商能力缓存（§3.11.1），必须放在最后 ----
 
 # 12) 上游拒收 output_config → 代理层整流重试

@@ -7,6 +7,9 @@ import type { Config } from "@/lib/ipc";
 /** 镜像后端 config.rs::MAX_MODELS（2.1-B §3.6：8 → 20）。 */
 export const MAX_MODELS = 20;
 
+/** 镜像后端 config.rs::DEFAULT_HEARTBEAT_SECS（§3.2）。 */
+export const DEFAULT_HEARTBEAT_SECS = 15;
+
 /** 镜像后端 config.rs::DEFAULT_USD_RATE（§五①）。 */
 export const DEFAULT_USD_RATE = 7.2;
 

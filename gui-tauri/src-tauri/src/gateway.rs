@@ -79,6 +79,12 @@ fn write_gateway_keys(existing: &mut serde_json::Value, port: u16) {
     existing["chatTabEnabled"] = serde_json::json!(true);
     // 免去每次启动都要选部署模式
     existing["disableDeploymentModeChooser"] = serde_json::json!(true);
+    // 2.1-C §3.2：流式响应的空闲等待上限，取 schema 允许的最大值。
+    // ⚠️ 这个键只在网关往响应里写 keep-alive 时才有意义 —— app.asar 原文：
+    // "A response on which nothing at all arrives — no pings — still fails after
+    //  about 5 minutes regardless of this key"。所以它必须和 proxy.rs 的心跳合流
+    // 配套交付，单写这个键治不了断流。（1.44121.1 起支持，值域 300–1800。）
+    existing["inferenceStreamIdleTimeoutSec"] = serde_json::json!(1800);
 }
 
 pub fn ensure_claude_desktop_gateway(port: u16) {
@@ -764,10 +770,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// §3.4：这七个键就是 ModelLink 写进网关配置的全部内容 —— 少一个都有用户可见的
+    /// §3.4：这几个键就是 ModelLink 写进网关配置的全部内容 —— 少一个都有用户可见的
     /// 后果（chatTabEnabled 不写 = Chat 页是关的）。改这张表要同步 docs。
     #[test]
-    fn gateway_keys_cover_the_seven_modellink_owns() {
+    fn gateway_keys_cover_everything_modellink_owns() {
         let mut existing = serde_json::json!({});
         write_gateway_keys(&mut existing, 5678);
         assert_eq!(
@@ -780,8 +786,18 @@ mod tests {
                 "inferenceGatewayAuthScheme": "bearer",
                 "chatTabEnabled": true,
                 "disableDeploymentModeChooser": true,
+                "inferenceStreamIdleTimeoutSec": 1800,
             })
         );
+    }
+
+    #[test]
+    fn stream_idle_timeout_stays_inside_the_schema_range() {
+        // app.asar 实测 schema：Un().int().min(300).max(1800).optional()
+        let mut existing = serde_json::json!({});
+        write_gateway_keys(&mut existing, 5678);
+        let v = existing["inferenceStreamIdleTimeoutSec"].as_u64().unwrap();
+        assert!((300..=1800).contains(&v), "{v} 越界会被 schema 拒掉");
     }
 
     #[test]

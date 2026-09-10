@@ -26,8 +26,15 @@ serde_json = "1"
 
 # 代理核心（自 v1 claude-model-proxy 平移，行为逐字节等价）
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# time：SSE 心跳的空闲计时（§3.2）
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = "0.1"
+bytes = "1"
 reqwest = { version = "0.12", features = ["stream"] }
+
+[dev-dependencies]
+# test-util：心跳单测用假时钟，不真等 15 秒
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 
 # macOS：请求日志时间戳取本地时区偏移（平移 v1 chrono_now）
 [target.'cfg(target_os = "macos")'.dependencies]

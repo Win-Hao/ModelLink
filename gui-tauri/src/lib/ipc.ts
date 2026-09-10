@@ -52,6 +52,8 @@ export type Config = {
   pricing_auto_sync?: boolean;
   /** 上次成功同步时间（Unix 秒字符串）。 */
   pricing_synced_at?: string;
+  /** 流式响应的 SSE 心跳间隔（秒），0 = 关闭；默认 15。 */
+  heartbeat_secs?: number;
 };
 
 export type PricingSyncResult = {

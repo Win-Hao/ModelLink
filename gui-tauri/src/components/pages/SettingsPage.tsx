@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import { DEFAULT_USD_RATE, formatAppliedAt } from "@/lib/presets";
+import { DEFAULT_HEARTBEAT_SECS, DEFAULT_USD_RATE, formatAppliedAt } from "@/lib/presets";
 import { guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
@@ -77,6 +77,24 @@ export function SettingsPage() {
       return;
     }
     if (n !== cur) updateDraft((c) => (c.usd_rate = n));
+  };
+
+  // 心跳间隔（本地编辑态，blur/Enter 提交）
+  const [hbText, setHbText] = useState("");
+  useEffect(() => {
+    if (draft) setHbText(String(draft.heartbeat_secs ?? DEFAULT_HEARTBEAT_SECS));
+  }, [draft?.heartbeat_secs]);
+
+  const submitHeartbeat = () => {
+    const cur = draft?.heartbeat_secs ?? DEFAULT_HEARTBEAT_SECS;
+    const n = Number(hbText);
+    // 上界 120：引擎约 5 分钟判死线，间隔再大就起不到保活作用了
+    if (hbText === "" || !Number.isInteger(n) || n < 0 || n > 120) {
+      toast.error("心跳间隔需在 0–120 秒之间（0 = 关闭）");
+      setHbText(String(cur));
+      return;
+    }
+    if (n !== cur) updateDraft((c) => (c.heartbeat_secs = n));
   };
 
   // 手动同步费率：无视自动开关与 6 小时阈值
@@ -163,6 +181,30 @@ export function SettingsPage() {
                 inputMode="numeric"
                 className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
               />
+            </div>
+          </div>
+
+          {/* SSE 心跳（2.1-C §3.2）：治长生成断流 */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">流式心跳间隔</div>
+              <div className="mt-px text-[11px] text-faint">
+                上游思考期间每隔这么久往 Claude 发一次保活，避免长生成被判断流 · 0 = 关闭
+              </div>
+            </div>
+            <div className="flex flex-none items-center gap-1.5">
+              <Input
+                value={hbText}
+                onChange={(e) => setHbText(e.target.value.replace(/[^0-9]/g, ""))}
+                onBlur={submitHeartbeat}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+                disabled={!draft}
+                inputMode="numeric"
+                className="mono h-[29px] w-[64px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
+              />
+              <span className="text-[11px] text-faint">秒</span>
             </div>
           </div>
 

@@ -96,6 +96,18 @@ fn default_true() -> bool {
     true
 }
 
+/// SSE 心跳默认间隔（§3.2）。取 15s：远小于引擎约 5 分钟的「无声连接」判死线，
+/// 又不至于把日志刷满。
+pub const DEFAULT_HEARTBEAT_SECS: u64 = 15;
+
+fn default_heartbeat_secs() -> u64 {
+    DEFAULT_HEARTBEAT_SECS
+}
+
+fn is_default_heartbeat(v: &u64) -> bool {
+    *v == DEFAULT_HEARTBEAT_SECS
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -136,6 +148,11 @@ pub struct Config {
     /// 上次成功同步的时间（Unix 秒，字符串）。空 = 从没同步过。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pricing_synced_at: String,
+    /// 2.1-C 新增（§3.2）：流式响应的 SSE 心跳间隔（秒）。0 = 关闭。
+    /// 上游沉默超过这个时长就往下游写一行 `: ping`，配合
+    /// `inferenceStreamIdleTimeoutSec` 治长生成断流。
+    #[serde(default = "default_heartbeat_secs", skip_serializing_if = "is_default_heartbeat")]
+    pub heartbeat_secs: u64,
 }
 
 impl Default for Config {
@@ -150,6 +167,7 @@ impl Default for Config {
             usd_rate: DEFAULT_USD_RATE,
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
+            heartbeat_secs: DEFAULT_HEARTBEAT_SECS,
         }
     }
 }

@@ -320,6 +320,68 @@ pub(crate) fn unmapped_slot_body(slot: &str) -> serde_json::Value {
     })
 }
 
+/// 请求是不是流式的（§3.2：心跳只对流式响应有意义，非流式插注释行会污染 JSON）。
+pub(crate) fn wants_stream(data: &serde_json::Value) -> bool {
+    data.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// SSE 心跳合流（§3.2）。上游沉默超过 `idle_secs` 就往下游写一行 SSE 注释
+/// `: ping\n\n`，上游一有数据立刻重置计时；上游结束/出错则本流随之结束。
+///
+/// 为什么必须是本地代理来做：`inferenceStreamIdleTimeoutSec`（1.44121.1，300–1800）
+/// 只在「网关往响应里写 keep-alive」时才生效 —— app.asar 原文：
+/// *"A response on which nothing at all arrives — no pings — still fails after about
+/// 5 minutes regardless of this key"*。ModelLink 正好站在中间，这是纯转发式工具做不到的。
+///
+/// 用注释行而不是伪造 `event: ping`：注释行是 SSE 规范里合法的保活手段，
+/// 解析器会直接丢弃，绝不会被当成一个事件塞进消息流。
+/// `idle_secs == 0` 表示关闭心跳。
+pub(crate) fn with_heartbeat<S, E>(
+    upstream: S,
+    idle_secs: u64,
+) -> tokio_stream::wrappers::ReceiverStream<Result<bytes::Bytes, E>>
+where
+    S: tokio_stream::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    use tokio_stream::StreamExt as _;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        tokio::pin!(upstream);
+        loop {
+            if idle_secs == 0 {
+                match upstream.next().await {
+                    Some(item) => {
+                        if tx.send(item).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+                continue;
+            }
+            let tick = tokio::time::sleep(std::time::Duration::from_secs(idle_secs));
+            tokio::select! {
+                item = upstream.next() => match item {
+                    Some(item) => {
+                        if tx.send(item).await.is_err() {
+                            return; // 下游已断开
+                        }
+                    }
+                    None => return, // 上游结束
+                },
+                _ = tick => {
+                    if tx.send(Ok(bytes::Bytes::from_static(b": ping\n\n"))).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    tokio_stream::wrappers::ReceiverStream::new(rx)
+}
+
 /// 上游响应头透传过滤（逐跳头不转发）。
 fn passthrough_headers(src: &reqwest::header::HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -413,6 +475,10 @@ async fn proxy_fallback(
         thinking_log = String::new();
     }
 
+    // 心跳只对流式响应有意义，且要在 data 被整流改写前定下来
+    let streaming = wants_stream(&data);
+    let heartbeat_secs = config.heartbeat_secs;
+
     let base = resolved.target_url.trim_end_matches('/');
     let url = format!("{}{}", base, parts.uri.path());
 
@@ -489,7 +555,13 @@ async fn proxy_fallback(
                     },
                 );
             }
-            return (status, headers, Body::from_stream(resp.bytes_stream())).into_response();
+            // §3.2：流式响应插 SSE 心跳，非流式保持原样直通（红线：字节等价）
+            let body = if streaming && heartbeat_secs > 0 {
+                Body::from_stream(with_heartbeat(resp.bytes_stream(), heartbeat_secs))
+            } else {
+                Body::from_stream(resp.bytes_stream())
+            };
+            return (status, headers, body).into_response();
         }
 
         // 4xx：此时下游一个字节都还没写出去，所以「已吐出 SSE 事件的请求不重试」
@@ -766,6 +838,92 @@ mod tests {
         // 没整流过就不加注
         let body = br#"{"error":{"message":"nope"}}"#;
         assert!(annotate_error_body(body, &[]).is_none());
+    }
+
+    // ---- §3.2 SSE 心跳合流 ----
+
+    use tokio_stream::StreamExt as _;
+
+    /// 收集心跳流的产出，直到它结束。假时钟下 `tokio::time::advance` 推进时间。
+    async fn drain(
+        mut s: impl tokio_stream::Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> + Unpin,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(item) = s.next().await {
+            out.push(String::from_utf8_lossy(&item.unwrap()).to_string());
+        }
+        out
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_upstream_gets_periodic_ping_comments() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::convert::Infallible>>(8);
+        let stream = with_heartbeat(tokio_stream::wrappers::ReceiverStream::new(rx), 15);
+
+        let handle = tokio::spawn(async move {
+            // 上游沉默 50 秒后才吐一个字节
+            tokio::time::sleep(std::time::Duration::from_secs(50)).await;
+            tx.send(Ok(bytes::Bytes::from_static(b"data: hi\n\n"))).await.unwrap();
+            drop(tx);
+        });
+
+        let got = drain(Box::pin(stream)).await;
+        handle.await.unwrap();
+        // 50 秒沉默 → 3 次心跳（15/30/45），随后是真数据
+        assert_eq!(
+            got,
+            vec![": ping\n\n", ": ping\n\n", ": ping\n\n", "data: hi\n\n"],
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upstream_data_resets_the_idle_timer() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::convert::Infallible>>(8);
+        let stream = with_heartbeat(tokio_stream::wrappers::ReceiverStream::new(rx), 15);
+
+        let handle = tokio::spawn(async move {
+            // 每 10 秒来一次数据，永远不该触发心跳
+            for i in 0..4 {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tx.send(Ok(bytes::Bytes::from(format!("chunk{i}")))).await.unwrap();
+            }
+            drop(tx);
+        });
+
+        let got = drain(Box::pin(stream)).await;
+        handle.await.unwrap();
+        assert_eq!(got, vec!["chunk0", "chunk1", "chunk2", "chunk3"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_stops_when_upstream_ends() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::convert::Infallible>>(8);
+        let stream = with_heartbeat(tokio_stream::wrappers::ReceiverStream::new(rx), 15);
+        drop(tx); // 上游立刻结束
+        assert_eq!(drain(Box::pin(stream)).await, Vec::<String>::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_interval_disables_the_heartbeat() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::convert::Infallible>>(8);
+        let stream = with_heartbeat(tokio_stream::wrappers::ReceiverStream::new(rx), 0);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            tx.send(Ok(bytes::Bytes::from_static(b"x"))).await.unwrap();
+            drop(tx);
+        });
+        let got = drain(Box::pin(stream)).await;
+        handle.await.unwrap();
+        assert_eq!(got, vec!["x"], "关掉心跳后 10 分钟沉默也不该有 ping");
+    }
+
+    #[test]
+    fn heartbeat_only_applies_to_streaming_requests() {
+        // 非流式响应整个 body 一次性到达，插心跳没有意义且会污染 JSON
+        assert!(wants_stream(&serde_json::json!({"stream": true})));
+        assert!(!wants_stream(&serde_json::json!({"stream": false})));
+        assert!(!wants_stream(&serde_json::json!({})));
+        assert!(!wants_stream(&serde_json::json!({"stream": "true"})));
     }
 
     // ---- §3.3 未映射槽位的 400 响应体 ----

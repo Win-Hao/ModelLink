@@ -32,7 +32,8 @@ mk_home() {
     {"target_url": "http://127.0.0.1:9999/sub", "api_key": "test-key-2", "models": [{"name": "real-b", "to_1m": ""}], "thinking_effort": "off"},
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-3", "models": [{"name": "real-c", "to_1m": ""}], "thinking_effort": "high"},
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key-4", "models": [{"name": "real-d", "to_1m": "auto"}], "thinking_effort": "max"}
-  ]
+  ],
+  "heartbeat_secs": 2
 }
 EOF
 }
@@ -94,6 +95,7 @@ DIVERGE = {
     "slot1-off-with-effort": "§3.10 桌面端已指定 effort，服务商级 off 不参与",
     "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
     "unmapped":              "§3.3 未映射槽位不再静默回落",
+    "slow-stream":           "§3.2 沉默的流式上游：新版插心跳，v1 纯直通",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
     "effort-reject-2":       "§3.11.1 能力缓存命中，effort 直接不发",
 }
@@ -153,6 +155,12 @@ t = "unmapped"
 check(t, not new.get(t) and len(old.get(t, [])) == 1,
       "未转发到上游（v1 静默回落到第一个模型）")
 
+# §3.2 心跳不改请求体，只影响响应流：两次转发（流式 + 非流式）都应原样到达上游
+t = "slow-stream"
+recs = new.get(t, [])
+check(t, len(recs) == 2 and all("metadata" in r.get("body", {}) for r in recs),
+      "请求体原样转发（心跳只加在响应侧）")
+
 # §3.11.1 首发被拒 → 去掉 output_config 重试一次
 t = "effort-reject-1"
 recs = new.get(t, [])
@@ -198,6 +206,39 @@ if [ "$(cat "$EQ/out-old/rectify.status")" = "400" ]; then
 else
   echo "✗ 对照失败：v1 的 rectify.status = $(cat "$EQ/out-old/rectify.status")"; fail=1
 fi
+echo "=== §3.2 SSE 心跳（上游沉默 7s，心跳间隔 2s） ==="
+if python3 - "$EQ" <<'PY'
+import sys, pathlib
+eq = pathlib.Path(sys.argv[1])
+fails = 0
+
+new_body = (eq / "out-new" / "heartbeat.body").read_text()
+old_body = (eq / "out-old" / "heartbeat.body").read_text()
+pings = new_body.count(": ping")
+# 7s 沉默 / 2s 间隔 → 至少 2 次（留一次余量给调度抖动）
+if pings >= 2:
+    print(f"✓ 流式沉默期间下游收到 {pings} 次 `: ping`")
+else:
+    print(f"✗ 心跳次数不足: {pings} 次，body={new_body!r}"); fails += 1
+if "message_stop" not in new_body:
+    print("✗ 上游真数据没能透传到下游"); fails += 1
+else:
+    print("✓ 心跳之后上游真事件照常透传")
+if ": ping" in old_body:
+    print("✗ 对照失败：v1 竟然也发了心跳"); fails += 1
+else:
+    print("✓ 对照：v1 纯直通，沉默期间一个字节都没有")
+
+# 非流式响应绝不能被插入注释行 —— 那会让 JSON 解析失败
+nostream = (eq / "out-new" / "nostream.body").read_text()
+if ": ping" in nostream:
+    print("✗ 非流式响应被插入了心跳，JSON 已污染"); fails += 1
+else:
+    print("✓ 非流式响应未插心跳")
+sys.exit(1 if fails else 0)
+PY
+then :; else fail=1; fi
+
 echo "=== /v1/models（2.1-B 槽位池已换，比对映射顺序而非槽位名） ==="
 if python3 - "$EQ" <<'PY'
 import json, sys, pathlib
@@ -233,7 +274,8 @@ fails = 0
 
 # 新版比 v1 多写的键 —— 剔除后其余必须逐字节一致
 # labelOverride: 2026-07-14 拍板例外；后两个: 2.1-A §3.4
-ADDED_KEYS = {"chatTabEnabled": True, "disableDeploymentModeChooser": True}
+ADDED_KEYS = {"chatTabEnabled": True, "disableDeploymentModeChooser": True,
+              "inferenceStreamIdleTimeoutSec": 1800}
 # 2.1-B §3.1：费率两键只在「应用」时写（那时才有模型与费率），
 # 启动自动配置阶段有意不碰 —— 否则每次重启都会把用户刚应用好的费率表清掉。
 PRICING_KEYS_MUST_BE_ABSENT = ["inferenceModelPricingEnabled", "inferenceModelPricing"]

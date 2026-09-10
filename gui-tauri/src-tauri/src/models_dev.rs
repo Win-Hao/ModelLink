@@ -121,8 +121,9 @@ pub fn lookup(catalog: &Catalog, url: &str, model: &str) -> Option<ModelInfo> {
                     cache_write: Some(0.0),
                     currency: "USD".to_string(),
                 },
-                // 订阅制方案里列的模型名常与用户填的对不上，上下文上限无从推断
-                context: None,
+                // 价格是服务商的属性（订阅制 = 0），上下文窗口是**模型自身**的属性 ——
+                // 这家没列这个模型，去别家借它的上下文事实是成立的（借价格则不成立）。
+                context: global_context(catalog, model),
             });
         }
         return None;
@@ -150,6 +151,22 @@ fn is_subscription_plan(models: &HashMap<String, ModelInfo>) -> bool {
                 .iter()
                 .all(|v| v.unwrap_or(0.0) == 0.0)
         })
+}
+
+/// 跨服务商查这个模型的上下文上限，取各家里**最宽松**的那个值。
+///
+/// 只对**上下文**这么做：它是模型自身的属性，同一个模型在哪家服务都是那么大；
+/// 价格则相反，同一个模型在不同家可以差好几倍，绝不能这样借。
+///
+/// 为什么取最大值而不是要求各家完全一致：实测 26 家都列了 kimi-k2.6，绝大多数写
+/// 262144，但 routing-run 写 200000、hyper 写 262000、privatemode-ai 写 256000 ——
+/// 要求完全一致就永远得不出结论。而这里只需回答一个是非题「有没有 1M」，
+/// 取最大值意味着**只有各家一致认为不到 1M 时才会提示用户**，宁可少提示。
+pub fn global_context(catalog: &Catalog, model: &str) -> Option<u64> {
+    catalog
+        .values()
+        .filter_map(|models| find_ci(models, model).and_then(|m| m.context))
+        .max()
 }
 
 fn find_ci(models: &HashMap<String, ModelInfo>, model: &str) -> Option<ModelInfo> {
@@ -356,6 +373,33 @@ mod tests {
         .claims_1m_it_does_not_have());
         assert!(!ModelEntry { to_1m: "auto".into(), ..Default::default() }
             .claims_1m_it_does_not_have());
+    }
+
+    #[test]
+    fn context_limit_falls_back_across_providers_but_price_does_not() {
+        // 上下文窗口是**模型自身**的属性，价格是**服务商**的属性 —— 两者的回退规则不同。
+        // 实例：Kimi Code（订阅制）下没列 Kimi-k2.6，但 moonshotai-cn 下写着 262144。
+        let c = catalog();
+        let got = lookup(&c, "https://api.kimi.com/coding/", "kimi-k2.6").unwrap();
+        // 价格用的是订阅制那家自己的 0，绝不串成 Moonshot 的 0.95
+        assert_eq!(got.pricing.input, Some(0.0));
+        // 上下文借用模型级事实
+        assert_eq!(got.context, Some(262_144));
+    }
+
+    #[test]
+    fn cross_provider_context_takes_the_most_generous_claim() {
+        // 实测各家对同一模型的上下文写法有出入（262144 / 262000 / 256000 / 200000）。
+        // 取最大值 → 只有各家一致认为不到 1M 时才会提示用户，宁可少提示。
+        let mut c = catalog();
+        c.get_mut("deepseek").unwrap().get_mut("deepseek-v4-pro").unwrap().context = Some(200_000);
+        c.get_mut("kimi-for-coding").unwrap().insert(
+            "deepseek-v4-pro".into(),
+            ModelInfo { pricing: ModelPricing::default(), context: Some(1_000_000) },
+        );
+        assert_eq!(global_context(&c, "deepseek-v4-pro"), Some(1_000_000));
+        // 谁都没写就是不知道
+        assert_eq!(global_context(&c, "查无此模型"), None);
     }
 
     #[test]

@@ -889,6 +889,27 @@ models.dev 的更新很勤：最近提交全是当天的 `chore(sync): update XX
   另有一条测试钉住「`provider_id_for_url` 的每个值都在 `known_provider_ids` 里」，
   两处漂移会让某家的补全列表静默消失。
 
+### ⑯ 模型清单三级兜底：发版快照（2026-09-10，用户提议）
+
+⑮ 把补全改成运行时拉 models.dev 之后仍有一个缺口：**用户首次打开、断网、
+或 models.dev 不可达时拿不到任何清单**，而那正是他最需要挑模型的时刻。
+（这个缺口在开发中真实触发过一次：某次启动同步失败，配置里 `models_dev_models` 为空。）
+
+**做法**：`npm run sync-models` 在发版前抓一次 models.dev，生成
+`src/lib/modelsSnapshot.ts` 并提交进仓库，打包进安装包。补全清单三级兜底：
+
+1. 运行时同步来的（最新）
+2. **发版快照**（`npm run sync-models` 生成，4.8 KB）
+3. 手写在预设里的那份（最后兜底 —— 会过期，实测落后过两代）
+
+生成脚本与后端 `parse_model_ids` 用同一套排序（发布日期新→旧），
+服务商列表与 `known_provider_ids()` 对齐。发版步骤已写进 `SIGNING.md`；
+快照文件的 diff 顺带能看清各家这段时间新增/下线了哪些模型。
+
+**一处刻意不做**：不用「最新的模型」自动当预设默认值。DeepSeek 当前最新的是
+`deepseek-v4-flash-vision-exp`（实验性视觉模型），自动填进去会很糟。
+预设点击时创建哪个模型仍由人工挑选的 `Preset.models` 决定。
+
 ### ⑫ Kimi 官方文档核实：只有 3 档，且换档会破前缀缓存
 
 `api.moonshot.cn/anthropic` 的 Messages API 文档里 `output_config.effort` 写明：

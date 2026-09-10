@@ -31,7 +31,7 @@ import {
   claims1mItDoesNotHave,
   formatContext,
   THINKING_LABELS,
-  getPresetModels,
+  modelSuggestions,
   getThinkingOptions,
   providerDisplayName,
   providerNeedsEffortDefault,
@@ -90,9 +90,7 @@ export function ProviderEditor({ index }: { index: number }) {
 
   if (!draft || !p) return null;
 
-  const presetModels = liveModels.data?.length
-    ? liveModels.data
-    : getPresetModels(p.target_url);
+  const presetModels = modelSuggestions(p.target_url, liveModels.data);
   const thinkOpts = getThinkingOptions(p.target_url);
   const capReached = totalModelsRaw(draft) >= MAX_MODELS;
   const name = providerDisplayName(p.target_url, index);

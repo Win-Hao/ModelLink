@@ -1,3 +1,4 @@
+import { MODELS_SNAPSHOT } from "@/lib/modelsSnapshot";
 import type { Config } from "@/lib/ipc";
 
 // ============================================================
@@ -171,6 +172,42 @@ export function getThinkingOptions(url: string): string[] {
 
 export function getPresetModels(url: string): string[] {
   return matchPreset(url)?.models ?? [];
+}
+
+/**
+ * URL → models.dev 服务商 ID，镜像后端 `models_dev::provider_id_for_url`。
+ * 只给快照兜底用 —— 运行时数据由后端按同一张表查好后返回。
+ */
+function modelsDevProviderId(url: string): string | undefined {
+  const u = url.toLowerCase();
+  const table: [string, string][] = [
+    ["api.kimi.com", "kimi-for-coding"],
+    ["moonshot", "moonshotai-cn"],
+    ["deepseek.com", "deepseek"],
+    ["minimaxi.com", "minimax-cn"],
+    ["minimax.io", "minimax"],
+    ["coding.dashscope", "alibaba-coding-plan-cn"],
+    ["token-plan", "alibaba-token-plan-cn"],
+    ["dashscope", "alibaba-cn"],
+    ["bigmodel.cn", "zhipuai"],
+    ["zhipu", "zhipuai"],
+    ["xiaomimimo", "xiaomi-token-plan-cn"],
+  ];
+  return table.find(([host]) => u.includes(host))?.[1];
+}
+
+/**
+ * 模型名补全的候选清单，三级兜底：
+ * 1. 运行时从 models.dev 同步来的（最新，但首次打开 / 断网时没有）
+ * 2. 发版时打包进来的快照（`npm run sync-models` 生成）
+ * 3. 手写在预设里的那份（最后的兜底；会过期，实测 Kimi Code 那条落后过两代）
+ */
+export function modelSuggestions(url: string, live: string[] | undefined): string[] {
+  if (live?.length) return live;
+  const pid = modelsDevProviderId(url);
+  const snap = pid ? MODELS_SNAPSHOT[pid] : undefined;
+  if (snap?.length) return snap;
+  return getPresetModels(url);
 }
 
 export const THINKING_LABELS: Record<string, string> = {

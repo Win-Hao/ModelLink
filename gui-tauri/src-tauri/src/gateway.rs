@@ -474,21 +474,6 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
         }
     }
 
-    // 开着 1M 但已知装不下的模型：不拦，但要说出来。
-    // 后果是静默的 —— 引擎照发 1M beta 头，上游按自己的上限截断，用户以为有 1M。
-    let mut bad_1m: Vec<String> = Vec::new();
-    for p in &config.providers {
-        for m in &p.models {
-            if m.claims_1m_it_does_not_have() {
-                bad_1m.push(format!(
-                    "{}（上游仅 {}K）",
-                    m.name,
-                    m.context_limit.unwrap_or(0) / 1024
-                ));
-            }
-        }
-    }
-
     let claude_dir = claude_3p_dir().ok_or("Cannot find home directory")?;
     let config_lib = claude_dir.join("configLibrary");
     std::fs::create_dir_all(&config_lib).map_err(|e| {
@@ -501,6 +486,15 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
 
     let flat = flatten_config(config);
     let models = inference_models_entries(&flat);
+
+    // 开着 1M 但已知装不下的模型：不拦，但要说出来。
+    // 后果是静默的 —— 引擎照发 1M beta 头，上游按自己的上限截断，用户以为有 1M。
+    // 只看 flat：超出 MAX_MODELS 的模型压根不会写进 Claude，警告它没有意义。
+    let bad_1m: Vec<String> = flat
+        .iter()
+        .filter(|e| e.claims_1m_it_does_not_have())
+        .map(|e| format!("{}（上游仅 {}K）", e.name, e.context_limit.unwrap_or(0) / 1024))
+        .collect();
 
     let meta_path = config_lib.join("_meta.json");
     let mut meta: serde_json::Value = if meta_path.exists() {
@@ -847,6 +841,20 @@ mod tests {
         assert!(msg.contains("Kimi-k2.6（上游仅 256K）"), "{msg}");
         assert!(!msg.contains("deepseek-v4-pro"), "{msg}");
         assert!(!msg.contains("unknown"), "{msg}");
+
+        // 超出 MAX_MODELS 的模型不会写进 Claude，警告它没有意义
+        let mut many = cfg.clone();
+        for i in 0..30 {
+            many.providers[0].models.push(ModelEntry {
+                name: format!("overflow-{i}"),
+                to_1m: "auto".into(),
+                context_limit: Some(100_000),
+                ..Default::default()
+            });
+        }
+        let msg = apply_to_claude_desktop(&many).unwrap();
+        assert!(msg.contains("overflow-0"), "槽位内的应当报: {msg}");
+        assert!(!msg.contains("overflow-25"), "超出 20 槽位的不该报: {msg}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

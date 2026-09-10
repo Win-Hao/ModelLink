@@ -123,7 +123,8 @@ export type ProbeResponse = { report: ProbeReport; headlines: string[] };
 
 export const guiVersion = () => invoke<string>("gui_version");
 export const getConfig = () => invoke<Config>("get_config");
-export const saveConfig = (config: Config) => invoke<void>("save_config", { config });
+/** 返回后端合并「后端专管」字段后的那份配置 —— 前端应据它算 dirty。 */
+export const saveConfig = (config: Config) => invoke<Config>("save_config", { config });
 export const configHash = (config: Config) => invoke<string>("config_hash", { config });
 export const testProvider = (targetUrl: string, apiKey: string, model: string) =>
   invoke<TestResult>("test_provider", { targetUrl, apiKey, model });

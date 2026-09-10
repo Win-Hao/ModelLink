@@ -105,12 +105,18 @@ impl ProxyState {
         self.bound_port.store(port, Ordering::SeqCst);
     }
 
+    /// 能力缓存的键。`[1m]` 变体与裸模型是同一个上游模型，能力必然相同 ——
+    /// 不归一化就会造出两条互不相通的记录，「学一次别再浪费往返」的意义就没了。
+    fn caps_key(url: &str, model: &str) -> (String, String) {
+        (url.to_string(), model.strip_suffix("[1m]").unwrap_or(model).to_string())
+    }
+
     /// 该服务商 + 上游模型是否已知不认 `output_config.effort`（§3.11.1 副作用）。
     pub fn effort_unsupported(&self, url: &str, model: &str) -> bool {
         self.caps
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(url.to_string(), model.to_string()))
+            .get(&Self::caps_key(url, model))
             .and_then(|c| c.effort_supported)
             == Some(false)
     }
@@ -120,7 +126,7 @@ impl ProxyState {
         self.caps
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .entry((url.to_string(), model.to_string()))
+            .entry(Self::caps_key(url, model))
             .or_default()
             .effort_supported = Some(false);
     }
@@ -130,7 +136,7 @@ impl ProxyState {
         self.caps
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(url.to_string(), model.to_string()))
+            .get(&Self::caps_key(url, model))
             .and_then(|c| c.accepts_thinking_blocks)
             == Some(false)
     }
@@ -139,7 +145,7 @@ impl ProxyState {
         self.caps
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .entry((url.to_string(), model.to_string()))
+            .entry(Self::caps_key(url, model))
             .or_default()
             .accepts_thinking_blocks = Some(false);
     }
@@ -299,6 +305,11 @@ pub(crate) fn optimize_title_generation(data: &mut serde_json::Value) -> bool {
 /// 判定刻意从严 —— 宁可漏认（多花 8 个 token）也不能误认，
 /// 把用户真正的请求本地短路掉才是灾难。
 pub(crate) fn is_health_check(data: &serde_json::Value) -> bool {
+    // 本地应答是一个 JSON 对象；请求方要 SSE 流时直接给 JSON 会把客户端搞崩，
+    // 与其伪造一串 SSE 事件，不如老老实实转给上游（只是 8 个 token）。
+    if wants_stream(data) {
+        return false;
+    }
     if data.get("max_tokens").and_then(|v| v.as_u64()) != Some(1) {
         return false;
     }
@@ -325,6 +336,24 @@ pub(crate) fn health_check_reply(model: &str) -> serde_json::Value {
         "stop_sequence": serde_json::Value::Null,
         "usage": {"input_tokens": 0, "output_tokens": 0}
     })
+}
+
+/// 请求发出前的思考参数处理：标题生成优化（§5.5.4）+ thinking 三态注入（§3.10）。
+/// 返回（写进请求日志的档位标签，是否做了标题优化）。
+///
+/// ⚠️ **顺序不能反**：标题优化里「桌面端已经选了就不动」那条豁免，看的必须是
+/// **桌面端发来的** `output_config.effort`。若先跑 `inject_thinking`，服务商的默认档
+/// 会被注进去，豁免条件随即成立 —— 于是只要用户在服务商上设过默认档，
+/// 标题优化就永远不生效。先优化、再让 `inject_thinking` 的透传分支自然接手。
+pub(crate) fn prepare_thinking(
+    data: &mut serde_json::Value,
+    provider_effort: &str,
+    optimize_title: bool,
+) -> (String, bool) {
+    let optimized =
+        optimize_title && is_title_generation(data) && optimize_title_generation(data);
+    let tag = inject_thinking(data, provider_effort);
+    (tag, optimized)
 }
 
 /// 整流器种类（§3.11）。
@@ -722,16 +751,13 @@ async fn proxy_fallback(
         return (StatusCode::OK, Json(health_check_reply(&resolved.model))).into_response();
     }
 
-    // thinking 三态注入（§3.10：透传优先，服务商级设置只兜底）
-    let mut thinking_log = inject_thinking(&mut data, &resolved.thinking_effort);
+    // 标题生成优化（§5.5.4）+ thinking 三态注入（§3.10），顺序见 prepare_thinking 注释
+    let (mut thinking_log, title_optimized) =
+        prepare_thinking(&mut data, &resolved.thinking_effort, config.optimize_title_gen);
     let mut notes: Vec<&'static str> = Vec::new();
-
-    // §5.5.4 会话标题生成：起个标题不值得花 88 个思考 token
-    if config.optimize_title_gen && is_title_generation(&data) && optimize_title_generation(&mut data)
-    {
+    if title_optimized {
         eprintln!("  标题生成：已降到 effort=low + thinking disabled");
         notes.push("已优化：标题生成");
-        thinking_log = "low".to_string();
     }
 
     if resolved.target_url.is_empty() {
@@ -1371,6 +1397,60 @@ mod tests {
         assert_eq!(v["usage"]["output_tokens"], 0);
     }
 
+    #[test]
+    fn streaming_health_check_is_not_short_circuited() {
+        // 本地应答是一个 JSON 对象；请求方要的是 SSE 流的话，直接给 JSON 会把客户端搞崩
+        let mut d = serde_json::json!({
+            "max_tokens": 1,
+            "stream": true,
+            "messages": [{"role": "user", "content": "."}]
+        });
+        assert!(!is_health_check(&d));
+        d["stream"] = serde_json::json!(false);
+        assert!(is_health_check(&d));
+    }
+
+    // ---- 标题生成优化与服务商默认档的交互 ----
+
+    #[test]
+    fn title_optimization_is_not_blocked_by_the_providers_own_default() {
+        // 服务商设了默认档（会被 inject_thinking 注入）时，标题优化仍应生效 ——
+        // 「桌面端已选」这条豁免只该看**桌面端**发来的值，不该看 ModelLink 自己刚注入的
+        let mut d = title_req();
+        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        assert!(optimized, "服务商默认档不该挡住标题优化");
+        assert_eq!(d["output_config"], serde_json::json!({"effort": "low"}));
+        assert_eq!(d["thinking"], serde_json::json!({"type": "disabled"}));
+        assert_eq!(tag, "low");
+    }
+
+    #[test]
+    fn title_optimization_still_yields_to_a_desktop_chosen_effort() {
+        let mut d = title_req();
+        d["output_config"] = serde_json::json!({"effort": "max"});
+        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        assert!(!optimized);
+        assert_eq!(d["output_config"], serde_json::json!({"effort": "max"}));
+        assert_eq!(tag, "max");
+    }
+
+    #[test]
+    fn non_title_requests_go_through_the_normal_three_state_path() {
+        let mut d = serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let (tag, optimized) = prepare_thinking(&mut d, "high", true);
+        assert!(!optimized);
+        assert_eq!(tag, "high");
+        assert_eq!(d["output_config"], serde_json::json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn title_optimization_can_be_turned_off() {
+        let mut d = title_req();
+        let (tag, optimized) = prepare_thinking(&mut d, "high", false);
+        assert!(!optimized);
+        assert_eq!(tag, "high", "关掉后走服务商默认档");
+    }
+
     // ---- §3.3 未映射槽位的 400 响应体 ----
 
     #[test]
@@ -1505,6 +1585,18 @@ mod tests {
     }
 
     // ---- §3.11.4 能力缓存（按服务商 + 真实上游模型 ID，绝不按槽位名） ----
+
+    #[test]
+    fn caps_cache_treats_the_1m_variant_as_the_same_model() {
+        // [1m] 只是路由后缀，背后是同一个上游模型 —— 学到的能力必须共用
+        let state = ProxyState::new(Config::default()).unwrap();
+        state.mark_effort_unsupported("https://a.example.com", "real-a[1m]");
+        assert!(state.effort_unsupported("https://a.example.com", "real-a"));
+        assert!(state.effort_unsupported("https://a.example.com", "real-a[1m]"));
+
+        state.mark_thinking_blocks_rejected("https://a.example.com", "real-b");
+        assert!(state.thinking_blocks_rejected("https://a.example.com", "real-b[1m]"));
+    }
 
     #[test]
     fn caps_cache_is_keyed_by_provider_and_real_model() {

@@ -22,8 +22,11 @@ pub fn get_config(state: State<'_, Arc<ProxyState>>) -> Config {
     state.config.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// 保存配置。**返回后端合并后的那份** —— 前端据它算 dirty，
+/// 否则草稿里缺的「后端专管」字段（同步来的费率、上下文上限）会让哈希算错，
+/// 表现为点完「应用」仍显示「尚未应用」。
 #[tauri::command]
-pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Result<(), String> {
+pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Result<Config, String> {
     // applied 哈希/时间/端口由后端专管（apply_to_claude / set_port 里更新），
     // 忽略前端回传值防止漂移。
     {
@@ -37,9 +40,9 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         models_dev::preserve_synced_pricing(&mut config, &cur);
     }
     save_config_file(&config)?;
-    *state.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+    *state.config.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
     eprintln!("[config] saved");
-    Ok(())
+    Ok(config)
 }
 
 /// 规范化配置摘要（design.md §8 应用状态机的 dirty 判定，前后端共用同一实现）。

@@ -110,7 +110,8 @@ mockIPC(async (cmd, payload) => {
       next.last_applied_hash = store.last_applied_hash;
       next.last_applied_at = store.last_applied_at;
       store = next;
-      return null;
+      // 与后端一致：返回合并后的那份，前端据它算 dirty
+      return next;
     }
     case "config_hash":
       return mockHash(args.config as Config);

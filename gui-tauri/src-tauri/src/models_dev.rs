@@ -347,32 +347,23 @@ mod tests {
 
     #[test]
     fn one_million_context_is_recognised() {
+        use crate::config::context_holds_1m;
         // 各家对「1M」的实际数字不一样：Kimi 是 1048576，DeepSeek / 智谱是 1000000
-        assert!(!ModelEntry { context_limit: Some(262_144), ..Default::default() }.has_1m_context());
-        assert!(ModelEntry { context_limit: Some(1_000_000), ..Default::default() }.has_1m_context());
-        assert!(ModelEntry { context_limit: Some(1_048_576), ..Default::default() }.has_1m_context());
+        assert!(!context_holds_1m(Some(262_144)));
+        assert!(context_holds_1m(Some(1_000_000)));
+        assert!(context_holds_1m(Some(1_048_576)));
         // 不知道就别下结论 —— 只有「明确知道装不下」才提示用户
-        assert!(ModelEntry { context_limit: None, ..Default::default() }.has_1m_context());
+        assert!(context_holds_1m(None));
     }
 
     #[test]
     fn the_1m_switch_is_flagged_only_when_we_know_it_cannot_hold() {
-        let on_small = ModelEntry {
-            to_1m: "auto".into(),
-            context_limit: Some(262_144),
-            ..Default::default()
-        };
-        assert!(on_small.claims_1m_it_does_not_have());
-        assert!(!ModelEntry { context_limit: Some(262_144), ..Default::default() }
-            .claims_1m_it_does_not_have());
-        assert!(!ModelEntry {
-            to_1m: "auto".into(),
-            context_limit: Some(1_048_576),
-            ..Default::default()
-        }
-        .claims_1m_it_does_not_have());
-        assert!(!ModelEntry { to_1m: "auto".into(), ..Default::default() }
-            .claims_1m_it_does_not_have());
+        use crate::config::claims_1m_without_it;
+        assert!(claims_1m_without_it("auto", Some(262_144)));
+        // 关着的、够大的、未知的都不该报
+        assert!(!claims_1m_without_it("", Some(262_144)));
+        assert!(!claims_1m_without_it("auto", Some(1_048_576)));
+        assert!(!claims_1m_without_it("auto", None));
     }
 
     #[test]

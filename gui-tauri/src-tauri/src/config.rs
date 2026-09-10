@@ -265,22 +265,22 @@ pub const ONE_M_CONTEXT: u64 = 1_000_000;
 /// `anthropicFamilyTier` 的合法取值（app.asar 实测 `Ba` 数组）。
 pub const FAMILY_TIERS: &[&str] = &["sonnet", "opus", "haiku", "fable", "mythos"];
 
+/// 这个上下文上限装不装得下 1M。**未知（None）时返回 true** ——
+/// 只有明确知道装不下才提示用户，绝不因为 models.dev 缺一条数据就去质疑用户的设置。
+pub fn context_holds_1m(limit: Option<u64>) -> bool {
+    limit.map(|c| c >= ONE_M_CONTEXT).unwrap_or(true)
+}
+
+/// 开着 1M 开关，但已知这个模型装不下。
+///
+/// 后果是静默的：引擎会剥掉 `[1m]` 后缀改发 `anthropic-beta: context-1m-2025-08-07`
+/// 头（实测代理从没收到过带 `[1m]` 的请求），多数上游照收不误但仍按自己的上限截断 ——
+/// 用户以为有 1M，实际没有。
+pub fn claims_1m_without_it(to_1m: &str, limit: Option<u64>) -> bool {
+    !to_1m.is_empty() && !context_holds_1m(limit)
+}
+
 impl ModelEntry {
-    /// 这个模型有没有 1M 上下文。**未知时返回 true** —— 只有明确知道装不下才提示用户，
-    /// 绝不因为 models.dev 里缺一条数据就去质疑用户的设置。
-    pub fn has_1m_context(&self) -> bool {
-        self.context_limit.map(|c| c >= ONE_M_CONTEXT).unwrap_or(true)
-    }
-
-    /// 开着 1M 开关，但已知这个模型装不下。
-    ///
-    /// 后果是静默的：引擎会剥掉 `[1m]` 后缀改发 `anthropic-beta: context-1m-2025-08-07`
-    /// 头（实测代理从没收到过带 `[1m]` 的请求），多数上游照收不误但仍按自己的上限截断 ——
-    /// 用户以为有 1M，实际没有。
-    pub fn claims_1m_it_does_not_have(&self) -> bool {
-        !self.to_1m.is_empty() && !self.has_1m_context()
-    }
-
     /// 实际写进网关的费率：手填优先，否则用同步值。
     pub fn effective_pricing(&self) -> Option<&ModelPricing> {
         match self.pricing.as_ref().filter(|p| !p.is_empty()) {
@@ -445,6 +445,13 @@ pub enum ResolveError {
     UnmappedSlot(String),
 }
 
+impl FlatEntry {
+    /// 见 `claims_1m_without_it`；这里只针对**真正写进 Claude 的**槽位。
+    pub fn claims_1m_it_does_not_have(&self) -> bool {
+        claims_1m_without_it(&self.to_1m, self.context_limit)
+    }
+}
+
 pub struct FlatEntry {
     pub slot: String,
     pub name: String,
@@ -456,6 +463,7 @@ pub struct FlatEntry {
     pub prefer_1m: bool,
     pub family_tier: String,
     pub family_default: bool,
+    pub context_limit: Option<u64>,
 }
 
 pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
@@ -475,6 +483,7 @@ pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
                     prefer_1m: m.prefer_1m,
                     family_tier: m.family_tier.clone(),
                     family_default: m.family_default,
+                    context_limit: m.context_limit,
                 });
                 count += 1;
             }
@@ -907,6 +916,22 @@ mod tests {
         for bad in [0.0, -1.0, f64::NAN] {
             assert_eq!(cny.in_usd(bad).input, Some(0.5556), "rate={bad}");
         }
+    }
+
+    #[test]
+    fn synced_pricing_participates_in_the_dirty_hash() {
+        // 同步来的费率会改变写进 Claude 的费率行 → 必须进哈希（否则价格变了也不提示重新应用）。
+        // 但这也意味着：前端草稿若落后于后台同步，它算出来的哈希就是错的。
+        let mut a = sample_config();
+        let mut b = sample_config();
+        b.providers[0].models[0].pricing_synced = Some(ModelPricing {
+            input: Some(0.95),
+            currency: "USD".into(),
+            ..Default::default()
+        });
+        assert_ne!(canonical_hash(&a), canonical_hash(&b));
+        a.providers[0].models[0].context_limit = Some(262_144);
+        assert_ne!(canonical_hash(&a), canonical_hash(&sample_config()));
     }
 
     #[test]

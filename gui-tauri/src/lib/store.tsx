@@ -111,12 +111,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     if (!cfg) return;
     const seq = ++saveSeq.current;
     try {
-      await saveConfig(cfg);
-      const cur = draftRef.current ?? cfg;
-      const h = await configHash(cur);
+      // 用后端返回的那份算 dirty：草稿里可能缺「后端专管」字段（后台同步来的费率、
+      // 上下文上限），拿草稿算出来的哈希是错的
+      const saved = await saveConfig(cfg);
+      const h = await configHash(saved);
       if (seq === saveSeq.current) {
         // 空配置无可应用，不算 dirty
-        setDirty(cur.providers.length > 0 && h !== (cur.last_applied_hash ?? ""));
+        setDirty(saved.providers.length > 0 && h !== (saved.last_applied_hash ?? ""));
       }
     } catch (e) {
       toast.error(`保存失败：${String(e)}`);
@@ -148,16 +149,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         await applyToClaude();
         const fresh = await getConfig();
         qc.setQueryData(["config"], fresh);
-        setDraft((prev) =>
-          prev
-            ? {
-                ...prev,
-                last_applied_hash: fresh.last_applied_hash,
-                last_applied_at: fresh.last_applied_at,
-              }
-            : prev,
-        );
-        const h = await configHash(draftRef.current!);
+        // 整份换掉而不是只挑两个字段：flushSave 已经把用户的编辑落盘了，fresh 里都有；
+        // 而草稿可能缺后台同步来的字段，留着它算 dirty 会算错
+        setDraft(structuredClone(fresh));
+        const h = await configHash(fresh);
         setDirty(h !== (fresh.last_applied_hash ?? ""));
         setFlashNonce((n) => n + 1);
         toast.success("已应用，Claude Desktop 正在重启...");

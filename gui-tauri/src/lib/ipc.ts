@@ -28,6 +28,8 @@ export type Config = {
   last_applied_at?: string;
   /** 代理端口（后端专管，set_port 热切换；缺省 5678）。 */
   port?: number;
+  /** 兼容模式：未映射的槽位回落到第一个模型（v1 静默行为），默认关。 */
+  compat_fallback?: boolean;
 };
 
 export type ProxyStatus = { running: boolean; port: number };

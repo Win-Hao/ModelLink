@@ -11,6 +11,7 @@
 //! - §3.10 thinking 注入改三态：桌面端自带 output_config.effort 时原样透传，
 //!   服务商级 thinking_effort 降级为「桌面端未指定时的默认档位」
 //! - §3.11.1 effort 整流：上游拒绝 output_config 时代理层移除后重试一次
+//! - §3.3 未映射的槽位不再静默回落到第一个模型，改为 400 + Anthropic 错误体
 
 use axum::{
     body::Body,
@@ -26,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::TcpListener;
 
-use crate::config::{flatten_config, resolve_model, Config, ResolvedModel};
+use crate::config::{flatten_config, resolve_model, Config, ResolveError, ResolvedModel};
 
 pub const MAX_LOGS: usize = 100;
 
@@ -305,6 +306,20 @@ pub(crate) fn annotate_error_body(body: &[u8], attempted: &[&str]) -> Option<Vec
     serde_json::to_vec(&v).ok()
 }
 
+/// §3.3 未映射槽位的 400 响应体（Anthropic 错误格式，桌面端会直接渲染 message）。
+pub(crate) fn unmapped_slot_body(slot: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": format!(
+                "ModelLink: 模型槽位 {} 未映射到任何服务商。请在 ModelLink 中配置后重试。",
+                slot
+            )
+        }
+    })
+}
+
 /// 上游响应头透传过滤（逐跳头不转发）。
 fn passthrough_headers(src: &reqwest::header::HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -352,18 +367,31 @@ async fn proxy_fallback(
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
-    let resolved = if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
-        let r = resolve_model(model, &config);
-        eprintln!("  model: {} -> {} ({})", model, r.model, r.target_url);
-        data["model"] = serde_json::json!(r.model);
-        r
-    } else {
-        ResolvedModel {
-            model: String::new(),
-            target_url: String::new(),
-            api_key: String::new(),
-            thinking_effort: String::new(),
-        }
+    let resolved = match data.get("model").and_then(|m| m.as_str()) {
+        Some(model) => match resolve_model(model, &config) {
+            Ok(r) => {
+                eprintln!("  model: {} -> {} ({})", model, r.model, r.target_url);
+                data["model"] = serde_json::json!(r.model);
+                r
+            }
+            // §3.3：宁可报错也不静默换一个模型给用户
+            Err(ResolveError::UnmappedSlot(slot)) => {
+                eprintln!("  error: 槽位 {} 未映射到任何服务商", slot);
+                push_log(
+                    state.as_ref(),
+                    LogEntry {
+                        time: chrono_now(),
+                        model: model.to_string(),
+                        status: 400,
+                        thinking: String::new(),
+                        note: "未映射槽位".to_string(),
+                        error: true,
+                    },
+                );
+                return (StatusCode::BAD_REQUEST, Json(unmapped_slot_body(&slot))).into_response();
+            }
+        },
+        None => ResolvedModel::default(),
     };
 
     // thinking 三态注入（§3.10：透传优先，服务商级设置只兜底）
@@ -738,6 +766,19 @@ mod tests {
         // 没整流过就不加注
         let body = br#"{"error":{"message":"nope"}}"#;
         assert!(annotate_error_body(body, &[]).is_none());
+    }
+
+    // ---- §3.3 未映射槽位的 400 响应体 ----
+
+    #[test]
+    fn unmapped_slot_body_is_an_anthropic_error() {
+        let v = unmapped_slot_body("claude-opus-5");
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            v["error"]["message"],
+            "ModelLink: 模型槽位 claude-opus-5 未映射到任何服务商。请在 ModelLink 中配置后重试。"
+        );
     }
 
     // ---- §3.11.4 能力缓存（按服务商 + 真实上游模型 ID，绝不按槽位名） ----

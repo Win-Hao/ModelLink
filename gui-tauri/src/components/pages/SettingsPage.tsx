@@ -21,10 +21,10 @@ const THEME_TABS: { value: ThemePref; label: string }[] = [
   { value: "system", label: "跟随系统" },
 ];
 
-/** 设置页（design.md §6.4）：外观 / 代理端口 / 开机自启 / 软件更新 / 关于。 */
+/** 设置页（design.md §6.4）：外观 / 代理端口 / 兼容模式 / 开机自启 / 软件更新 / 关于。 */
 export function SettingsPage() {
   const { pref, setPref } = useTheme();
-  const { changePort } = useAppStore();
+  const { changePort, draft, updateDraft } = useAppStore();
   const updater = useUpdaterCtx();
   const qc = useQueryClient();
 
@@ -130,6 +130,26 @@ export function SettingsPage() {
                 className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
               />
             </div>
+          </div>
+
+          {/* 兼容模式（2.1-A §3.3）：给依赖旧版静默回落行为的用户留的台阶 */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">未映射槽位回落（兼容模式）</div>
+              <div className="mt-px text-[11px] text-faint">
+                关闭时，Claude 请求了没配置的模型槽位会直接报错；开启则沿用旧版行为，
+                悄悄改用第一个模型
+              </div>
+            </div>
+            <Switch
+              checked={draft?.compat_fallback ?? false}
+              disabled={!draft}
+              onCheckedChange={(ck) =>
+                updateDraft((c) => {
+                  c.compat_fallback = ck;
+                })
+              }
+            />
           </div>
 
           {/* 开机自启 */}

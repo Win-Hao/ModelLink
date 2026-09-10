@@ -3,9 +3,13 @@
 //! ⚠️ 兼容红线（docs/gui-rebuild-tauri.md §3）：
 //! - `~/.claude-model-proxy/config.json` 路径与 serde 格式不变
 //! - 原子写入（tmp+rename）、unix 0600
-//! - 8 槽位映射、`[1m]` 变体、无匹配 fallback 第一个模型
+//! - 8 槽位映射、`[1m]` 变体
 //!
 //! 平移不重写：除模块化拆分与可测试性抽取外，禁止任何行为改动。
+//!
+//! 2.1-A 有意偏离 v1 的一处（design-2.1-follow-desktop.md §3.3）：
+//! 未匹配的槽位不再静默回落到第一个模型，改为返回 `ResolveError::UnmappedSlot`
+//! （旧行为保留在 `compat_fallback` 开关后，默认关）。
 // v1 原样平移的代码保持逐字节一致，不做 clippy 风格改写（红线 #4）
 #![allow(clippy::ptr_arg, clippy::manual_strip)]
 
@@ -35,6 +39,10 @@ fn is_default_port(p: &u16) -> bool {
     *p == DEFAULT_PORT
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -50,6 +58,11 @@ pub struct Config {
     /// 默认 5678 时不序列化 —— 红线 #1 对默认值成立，老用户文件格式不变。
     #[serde(default = "default_port", skip_serializing_if = "is_default_port")]
     pub port: u16,
+    /// 2.1-A 新增（§3.3）：兼容模式 —— 未映射的槽位仍回落到第一个模型（v1 的静默行为）。
+    /// 默认关：未映射直接 400，用户才知道自己在用什么模型。
+    /// 值为 false 时不序列化 —— 老用户文件格式不变。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compat_fallback: bool,
 }
 
 impl Default for Config {
@@ -59,6 +72,7 @@ impl Default for Config {
             last_applied_hash: String::new(),
             last_applied_at: String::new(),
             port: DEFAULT_PORT,
+            compat_fallback: false,
         }
     }
 }
@@ -155,6 +169,8 @@ pub fn save_config_file(config: &Config) -> Result<(), String> {
 /// 规范化配置摘要（design.md §8）：对 providers + port 的规范化 JSON（稳定键序）
 /// 取 FNV-1a 64。不依赖第三方 crate，跨版本稳定 —— 该值持久化在 config.json 里。
 /// port 参与哈希（改端口须重新应用），默认 5678 时不序列化 → 老 hash 不受升级影响。
+/// compat_fallback 只影响代理自身的路由行为、不改写 Claude Desktop 的任何键，
+/// 故**不**参与哈希（切它不该提示「需重新应用」）。
 pub fn canonical_hash(config: &Config) -> String {
     let canon = Config {
         providers: config.providers.clone(),
@@ -170,11 +186,20 @@ pub fn canonical_hash(config: &Config) -> String {
     format!("{:016x}", h)
 }
 
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct ResolvedModel {
     pub model: String,
     pub target_url: String,
     pub api_key: String,
     pub thinking_effort: String,
+}
+
+/// 槽位解析失败（§3.3）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// 请求的槽位没有映射到任何服务商模型 —— 代理返回 400，不再静默回落。
+    /// 携带的是去掉 `[1m]` 后缀的裸槽位名（那才是需要用户去配的东西）。
+    UnmappedSlot(String),
 }
 
 pub struct FlatEntry {
@@ -207,7 +232,14 @@ pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
     result
 }
 
-pub fn resolve_model(model: &str, config: &Config) -> ResolvedModel {
+/// 槽位 → 上游模型。未匹配时返回 `Err(UnmappedSlot)`（§3.3）：
+///
+/// v1 在这里回落到 flat 里的第一个模型，只打一行 eprintln 就照发不误。叠加上游的
+/// 同类行为更糟 —— 实测 Kimi `/coding/` 端点对 `banana`、空字符串、`claude-opus-5`
+/// 一律 200 直接给默认模型。两层静默回落之下，用户完全不知道自己在用什么模型。
+///
+/// 依赖旧行为的用户可打开 `compat_fallback`（默认关）。
+pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, ResolveError> {
     let (base, is_1m) = if model.ends_with("[1m]") {
         (&model[..model.len() - 4], true)
     } else {
@@ -222,35 +254,33 @@ pub fn resolve_model(model: &str, config: &Config) -> ResolvedModel {
             } else {
                 e.name.clone()
             };
-            return ResolvedModel {
+            return Ok(ResolvedModel {
                 model: resolved,
                 target_url: e.url.clone(),
                 api_key: e.key.clone(),
                 thinking_effort: e.thinking_effort.clone(),
+            });
+        }
+    }
+
+    if config.compat_fallback {
+        if let Some(e) = flat.into_iter().next() {
+            let resolved = if is_1m && !e.to_1m.is_empty() {
+                format!("{}[1m]", e.name)
+            } else {
+                e.name
             };
+            eprintln!("  fallback: {} -> {} (兼容模式)", model, resolved);
+            return Ok(ResolvedModel {
+                model: resolved,
+                target_url: e.url,
+                api_key: e.key,
+                thinking_effort: e.thinking_effort,
+            });
         }
     }
-    if let Some(e) = flat.into_iter().next() {
-        let resolved = if is_1m && !e.to_1m.is_empty() {
-            format!("{}[1m]", e.name)
-        } else {
-            e.name
-        };
-        eprintln!("  fallback: {} -> {}", model, resolved);
-        ResolvedModel {
-            model: resolved,
-            target_url: e.url,
-            api_key: e.key,
-            thinking_effort: e.thinking_effort,
-        }
-    } else {
-        ResolvedModel {
-            model: model.to_string(),
-            target_url: String::new(),
-            api_key: String::new(),
-            thinking_effort: String::new(),
-        }
-    }
+
+    Err(ResolveError::UnmappedSlot(base.to_string()))
 }
 
 #[cfg(test)]
@@ -338,7 +368,7 @@ mod tests {
     #[test]
     fn resolve_matches_slot_to_provider_model() {
         let cfg = sample_config();
-        let r = resolve_model("claude-3-sonnet-20240229", &cfg);
+        let r = resolve_model("claude-3-sonnet-20240229", &cfg).unwrap();
         assert_eq!(r.model, "model-b1");
         assert_eq!(r.target_url, "https://b.example.com");
         assert_eq!(r.api_key, "key-b");
@@ -348,41 +378,95 @@ mod tests {
     #[test]
     fn resolve_1m_suffix_maps_when_to_1m_set() {
         let cfg = sample_config();
-        let r = resolve_model("claude-3-opus-latest[1m]", &cfg);
+        let r = resolve_model("claude-3-opus-latest[1m]", &cfg).unwrap();
         assert_eq!(r.model, "model-a1[1m]");
     }
 
     #[test]
     fn resolve_1m_suffix_dropped_when_to_1m_empty() {
         let cfg = sample_config();
-        let r = resolve_model("claude-3-5-sonnet-latest[1m]", &cfg);
+        let r = resolve_model("claude-3-5-sonnet-latest[1m]", &cfg).unwrap();
         assert_eq!(r.model, "model-a2");
     }
 
+    // ---- §3.3 未映射槽位：不再静默回落 ----
+
     #[test]
-    fn resolve_unknown_model_falls_back_to_first_entry() {
+    fn resolve_unknown_model_reports_unmapped_slot() {
         let cfg = sample_config();
-        let r = resolve_model("claude-9-nonexistent", &cfg);
-        assert_eq!(r.model, "model-a1");
-        assert_eq!(r.target_url, "https://a.example.com");
-        assert_eq!(r.thinking_effort, "max");
+        assert_eq!(
+            resolve_model("claude-9-nonexistent", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-9-nonexistent".into()))
+        );
     }
 
     #[test]
-    fn resolve_unknown_1m_falls_back_with_variant() {
+    fn resolve_unmapped_slot_strips_1m_suffix_in_error() {
         let cfg = sample_config();
-        let r = resolve_model("claude-9-nonexistent[1m]", &cfg);
+        // 报出去的是裸槽位名 —— 那才是用户要在 ModelLink 里配的东西
+        assert_eq!(
+            resolve_model("claude-9-nonexistent[1m]", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-9-nonexistent".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_slot_beyond_configured_models_is_unmapped() {
+        // 配置里只有 3 个模型，第 4 个槽位没人认领
+        let cfg = sample_config();
+        assert_eq!(
+            resolve_model("claude-3-haiku-20240307", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-3-haiku-20240307".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_empty_config_reports_unmapped_slot() {
+        let cfg = Config::default();
+        assert_eq!(
+            resolve_model("claude-3-opus-latest", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-3-opus-latest".into()))
+        );
+    }
+
+    // ---- 兼容模式（默认关）：还原 v1 的回落行为 ----
+
+    #[test]
+    fn compat_mode_restores_v1_fallback_to_first_entry() {
+        let mut cfg = sample_config();
+        cfg.compat_fallback = true;
+        let r = resolve_model("claude-9-nonexistent", &cfg).unwrap();
+        assert_eq!(r.model, "model-a1");
+        assert_eq!(r.target_url, "https://a.example.com");
+        assert_eq!(r.thinking_effort, "max");
+
+        let r = resolve_model("claude-9-nonexistent[1m]", &cfg).unwrap();
         assert_eq!(r.model, "model-a1[1m]");
     }
 
     #[test]
-    fn resolve_empty_config_passes_model_through() {
-        let cfg = Config::default();
-        let r = resolve_model("claude-3-opus-latest", &cfg);
-        assert_eq!(r.model, "claude-3-opus-latest");
-        assert_eq!(r.target_url, "");
-        assert_eq!(r.api_key, "");
-        assert_eq!(r.thinking_effort, "");
+    fn compat_mode_still_errors_when_nothing_to_fall_back_to() {
+        let cfg = Config { compat_fallback: true, ..Default::default() };
+        assert_eq!(
+            resolve_model("claude-3-opus-latest", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-3-opus-latest".into()))
+        );
+    }
+
+    #[test]
+    fn compat_fallback_defaults_off_and_round_trips() {
+        // 老文件没有这个键 → 默认关
+        let cfg: Config = serde_json::from_str(r#"{"providers":[]}"#).unwrap();
+        assert!(!cfg.compat_fallback);
+        // 关着时不序列化 —— 老用户文件格式不变
+        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("compat_fallback"));
+        let mut cfg = sample_config();
+        cfg.compat_fallback = true;
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(out.contains("\"compat_fallback\":true"));
+        assert!(serde_json::from_str::<Config>(&out).unwrap().compat_fallback);
+        // 只影响代理路由，不改 Claude Desktop 的键 → 不参与 dirty 判定
+        assert_eq!(canonical_hash(&cfg), canonical_hash(&sample_config()));
     }
 
     // ---- serde 格式兼容（红线 #2） ----

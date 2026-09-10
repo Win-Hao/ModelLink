@@ -83,6 +83,7 @@ eq = pathlib.Path(sys.argv[1])
 DIVERGE = {
     "slot1-off-with-effort": "§3.10 桌面端已指定 effort，服务商级 off 不参与",
     "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
+    "unmapped":              "§3.3 未映射槽位不再静默回落",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
     "effort-reject-2":       "§3.11.1 能力缓存命中，effort 直接不发",
 }
@@ -137,6 +138,11 @@ check(t, len(new.get(t, [])) == 1
          and b.get("thinking") == {"type": "adaptive"},
       "effort 与 adaptive 思考均原样透传（v1 会覆盖成 enabled+8192/high）")
 
+# §3.3 未映射槽位 → 直接 400，一次上游都不打（v1 会回落到 real-a 照发）
+t = "unmapped"
+check(t, not new.get(t) and len(old.get(t, [])) == 1,
+      "未转发到上游（v1 静默回落到第一个模型）")
+
 # §3.11.1 首发被拒 → 去掉 output_config 重试一次
 t = "effort-reject-1"
 recs = new.get(t, [])
@@ -156,6 +162,22 @@ PY
 then :; else fail=1; fi
 
 echo "=== 新行为响应断言（2.1-A） ==="
+if [ "$(cat "$EQ/out-new/unmapped.status")" = "400" ] &&
+   python3 -c "
+import json,sys
+b = json.load(open('$EQ/out-new/unmapped.body'))
+m = b['error']['message']
+sys.exit(0 if b['type']=='error' and b['error']['type']=='invalid_request_error'
+             and m.startswith('ModelLink: 模型槽位 claude-nonexistent-9 未映射') else 1)"; then
+  echo "✓ 未映射槽位返回 400 + Anthropic 错误体（槽位名已剥 [1m]）"
+else
+  echo "✗ 未映射槽位响应异常: $(cat "$EQ/out-new/unmapped.status") $(cat "$EQ/out-new/unmapped.body")"; fail=1
+fi
+if [ "$(cat "$EQ/out-old/unmapped.status")" = "200" ]; then
+  echo "✓ 对照：v1 静默回落并返回 200"
+else
+  echo "✗ 对照失败：v1 的 unmapped.status = $(cat "$EQ/out-old/unmapped.status")"; fail=1
+fi
 if [ "$(cat "$EQ/out-new/rectify.status")" = "200" ] && grep -q '"text": *"ok"\|"text":"ok"' "$EQ/out-new/rectify.body"; then
   echo "✓ 整流后对下游返回 200（桌面端看不到上游那个 400，也就不会锁会话）"
 else

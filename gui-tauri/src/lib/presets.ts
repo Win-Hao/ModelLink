@@ -83,6 +83,8 @@ export const PRESETS: Preset[] = [
     id: "deepseek",
     name: "DeepSeek",
     url: "https://api.deepseek.com/anthropic",
+    // 两条都还是当前主力（v4-pro 2026-08-12 / v4-flash 2026-07-31）。
+    // 不收 deepseek-v4-flash-vision-exp —— 实验性视觉模型，不适合当默认。
     models: ["deepseek-v4-pro", "deepseek-v4-flash"],
     thinkingOptions: ["", "off", "high", "max"],
   },
@@ -90,7 +92,9 @@ export const PRESETS: Preset[] = [
     id: "kimi-code",
     name: "Kimi Code（订阅制）",
     url: "https://api.kimi.com/coding/",
-    models: ["Kimi-k2.6"],
+    // 订阅制现在提供的是 k3（2026-07-16，1M 上下文）与 k3-256k。
+    // 原先写的 Kimi-k2.6 是开放平台的型号，在这家的目录里根本不存在。
+    models: ["k3", "k3-256k"],
     // 官方文档：output_config.effort 支持 low / high / max，默认 max。
     // medium 与 xhigh 是 Claude Desktop 的档位，Kimi 在网关侧映射掉，这里不列。
     thinkingOptions: ["", "off", "low", "high", "max"],
@@ -99,7 +103,8 @@ export const PRESETS: Preset[] = [
     id: "kimi",
     name: "Kimi 开放平台（按量付费）",
     url: "https://api.moonshot.cn/anthropic",
-    models: ["kimi-k2.5", "kimi-k2.6"],
+    // kimi-k3 是当前旗舰（1M 上下文），kimi-k2.7-code 便宜三倍且专做编码。
+    models: ["kimi-k3", "kimi-k2.7-code"],
     // 同上，官方文档所列的三档
     thinkingOptions: ["", "off", "low", "high", "max"],
   },
@@ -107,35 +112,43 @@ export const PRESETS: Preset[] = [
     id: "minimax",
     name: "MiniMax",
     url: "https://api.minimaxi.com/anthropic",
-    models: ["MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+    // M3（2026-06-01）是当前旗舰，且是这家唯一有 1M 上下文的。
+    models: ["MiniMax-M3", "MiniMax-M2.7"],
     thinkingOptions: ["", "off"],
   },
   {
     id: "qwen-coding",
     name: "百炼 Coding Plan",
     url: "https://coding.dashscope.aliyuncs.com/apps/anthropic",
-    models: ["qwen3.6-plus", "qwen3-coder-next"],
+    // qwen3.7-plus 是套餐内当前主力；qwen3.6-flash 更快更省。
+    models: ["qwen3.7-plus", "qwen3.6-flash"],
     thinkingOptions: ["", "off"],
   },
   {
     id: "qwen-token",
     name: "百炼 Token Plan",
     url: "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
-    models: ["qwen3.6-plus", "qwen3-coder-next", "glm-5", "MiniMax-M2.5"],
+    // qwen3.8 系列是当前主力（max 强、flash 快）。
+    // 不收 qwen3.8-max-preview（预览版）与 happyhorse-*（视频生成，非对话模型）。
+    models: ["qwen3.8-max", "qwen3.8-flash", "glm-5.2"],
     thinkingOptions: ["", "off"],
   },
   {
     id: "glm",
     name: "GLM（智谱）",
     url: "https://open.bigmodel.cn/api/anthropic",
-    models: ["glm-5.1", "glm-5-turbo", "glm-4.7", "glm-4.5-air"],
+    // glm-5.3（2026-08-14）是当前旗舰且有 1M 上下文；flash 便宜近 20 倍。
+    // 不收 glm-5v-turbo（视觉，且贵 3.5 倍）。
+    models: ["glm-5.3", "glm-5.3-flash"],
     thinkingOptions: ["", "off"],
   },
   {
     id: "mimo",
     name: "mimo",
     url: "https://api.xiaomimimo.com/anthropic",
-    models: ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"],
+    // v2.5 系列（2026-04-22，1M 上下文）。
+    // 不收 mimo-*-tts（语音合成，上下文只有 8K，不是对话模型）。
+    models: ["mimo-v2.5-pro", "mimo-v2.5"],
     thinkingOptions: ["", "off"],
   },
 ];

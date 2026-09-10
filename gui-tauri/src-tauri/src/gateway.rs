@@ -371,7 +371,7 @@ fn write_org_instructions(
 fn identity_note_text(slot_map: &[(String, String)]) -> String {
     let lines: Vec<String> = slot_map.iter().map(|(slot, name)| format!("{slot} = {name}")).collect();
     format!(
-        "以下是 ModelLink 本地网关的槽位映射；系统提示词中出现的 Claude 模型名只是路由槽位，\n         不代表你的真实身份：\n{}\n请按你实际对应的真实模型作答。",
+        "以下是 ModelLink 本地网关的槽位映射；系统提示词中出现的 Claude 模型名只是路由槽位，不代表你的真实身份：\n{}\n请按你实际对应的真实模型作答。",
         lines.join("\n")
     )
 }
@@ -911,6 +911,15 @@ mod tests {
         assert!(s.contains("claude-sonnet-5 = glm-5.1"), "{s}");
         assert!(s.contains("路由槽位"), "{s}");
         assert!(s.ends_with("统一用简体中文回答。"), "用户文本必须原样附在后面: {s}");
+    }
+
+    #[test]
+    fn identity_note_has_no_stray_indentation() {
+        // 这段文字会进模型的系统提示词 —— Rust 多行字符串的续行很容易把缩进带进去
+        let map = [("claude-opus-5".to_string(), "Kimi-k2.6".to_string())];
+        for line in identity_note_text(&map).lines() {
+            assert_eq!(line, line.trim(), "行首/行尾有多余空白: {line:?}");
+        }
     }
 
     #[test]

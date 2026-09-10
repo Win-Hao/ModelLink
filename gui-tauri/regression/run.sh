@@ -96,6 +96,7 @@ DIVERGE = {
     "slot2-passthrough":     "§3.10 effort + adaptive 原样透传",
     "unmapped":              "§3.3 未映射槽位不再静默回落",
     "slow-stream":           "§3.2 沉默的流式上游：新版插心跳，v1 纯直通",
+    "title-gen":             "§5.5.4 标题生成降到最省档",
     "budget-reject":         "§3.11.2 budget 下限 → 抬到 32000 重试",
     "sig-reject":            "§3.11.3 thinking 块签名 → 剥掉后重试",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
@@ -156,6 +157,17 @@ check(t, len(new.get(t, [])) == 1
 t = "unmapped"
 check(t, not new.get(t) and len(old.get(t, [])) == 1,
       "未转发到上游（v1 静默回落到第一个模型）")
+
+# §5.5.4 标题生成：降到 effort=low + thinking disabled（v1 原样转发）
+t = "title-gen"
+recs = new.get(t, [])
+ok = len(recs) == 1
+if ok:
+    b = recs[0]["body"]
+    ok = (b.get("output_config") == {"effort": "low"}
+          and b.get("thinking") == {"type": "disabled"}
+          and old.get(t, [{}])[0].get("body", {}).get("output_config") is None)
+check(t, ok, "已降到最省档，且 v1 对照原样转发")
 
 # §3.2 心跳不改请求体，只影响响应流：两次转发（流式 + 非流式）都应原样到达上游
 t = "slow-stream"
@@ -315,7 +327,9 @@ fails = 0
 # 新版比 v1 多写的键 —— 剔除后其余必须逐字节一致
 # labelOverride: 2026-07-14 拍板例外；后两个: 2.1-A §3.4
 ADDED_KEYS = {"chatTabEnabled": True, "disableDeploymentModeChooser": True,
-              "inferenceStreamIdleTimeoutSec": 1800}
+              "inferenceStreamIdleTimeoutSec": 1800,
+              # §5.5.5：槽位名都是完整 ID，app 本就会跳过发现流程，显式关掉免得白跑往返
+              "modelDiscoveryEnabled": False}
 # 2.1-B §3.1：费率两键只在「应用」时写（那时才有模型与费率），
 # 启动自动配置阶段有意不碰 —— 否则每次重启都会把用户刚应用好的费率表清掉。
 PRICING_KEYS_MUST_BE_ABSENT = ["inferenceModelPricingEnabled", "inferenceModelPricing"]

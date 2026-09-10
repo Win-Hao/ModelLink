@@ -87,6 +87,10 @@ fn write_gateway_keys(existing: &mut serde_json::Value, port: u16, gate: &Versio
     // "A response on which nothing at all arrives — no pings — still fails after
     //  about 5 minutes regardless of this key"。所以它必须和 proxy.rs 的心跳合流
     // 配套交付，单写这个键治不了断流。（1.44121.1 起支持，值域 300–1800。）
+    // §5.5.5：ModelLink 的 /v1/models 只会返回它自己那几个槽位，而槽位名都是完整 ID，
+    // app 本来就会跳过发现流程；显式关掉免得某些路径下白跑一次往返。
+    // （实测 Kimi 返回的 4 个 ID 全被名字过滤器删光，纯浪费。）
+    existing["modelDiscoveryEnabled"] = serde_json::json!(false);
     if gate.allows("inferenceStreamIdleTimeoutSec") {
         existing["inferenceStreamIdleTimeoutSec"] = serde_json::json!(1800);
     }
@@ -1236,6 +1240,7 @@ mod tests {
                 "inferenceGatewayAuthScheme": "bearer",
                 "chatTabEnabled": true,
                 "disableDeploymentModeChooser": true,
+                "modelDiscoveryEnabled": false,
                 "inferenceStreamIdleTimeoutSec": 1800,
             })
         );

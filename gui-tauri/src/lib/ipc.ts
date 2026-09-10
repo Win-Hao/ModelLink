@@ -70,6 +70,10 @@ export type Config = {
   egress_proxy_url?: string;
   /** PAC 自动配置地址；设了它就压过 egress_proxy_url。 */
   egress_proxy_pac_url?: string;
+  /** 给会话标题生成注入最省的思考设置（默认开）。 */
+  optimize_title_gen?: boolean;
+  /** 连接健康检查本地应答，不打上游（默认关）。 */
+  short_circuit_health_check?: boolean;
 };
 
 /** 检测到的 Claude Desktop 版本 + 因版本过低不可用的键（§3.8）。 */

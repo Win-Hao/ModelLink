@@ -160,6 +160,18 @@ pub struct Config {
     /// 「我是 Claude，由 Anthropic 开发」。
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub org_identity_note: bool,
+    /// 2.1 新增（§5.5.4）：给会话标题生成注入最省的思考设置。默认开。
+    ///
+    /// 桌面端每开一个新会话都会来一发标题生成：451 in / 110 out，其中 88 是思考 token，
+    /// 只为起个标题。关掉思考对标题质量没有可见影响。
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub optimize_title_gen: bool,
+    /// 2.1 新增（§5.5.4）：连接健康检查本地短路，不打上游。默认**关**。
+    ///
+    /// 只省 8 个 token，却会让健康检查在上游已经挂掉时依然显示正常 ——
+    /// 掩盖真实故障的代价远大于这点开销，所以默认不开，留给确实在意的用户。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub short_circuit_health_check: bool,
     /// 2.1-E 新增（§3.9）：Claude Desktop 出网代理。只接受 http:// / https://，
     /// 不接受内嵌账号密码；空 = 不设。
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -188,6 +200,8 @@ impl Default for Config {
             pricing_synced_at: String::new(),
             org_instructions: String::new(),
             org_identity_note: true,
+            optimize_title_gen: true,
+            short_circuit_health_check: false,
             egress_proxy_url: String::new(),
             egress_proxy_pac_url: String::new(),
             heartbeat_secs: DEFAULT_HEARTBEAT_SECS,

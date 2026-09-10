@@ -254,6 +254,79 @@ pub(crate) fn inject_thinking(data: &mut serde_json::Value, te: &str) -> String 
     te.to_string()
 }
 
+/// 会话标题生成请求的特征串（§5.5.4 抓包所见的原文开头）。
+const TITLE_PROMPT_PREFIX: &str = "You are coming up with a succinct title";
+
+/// 取首条消息的正文（字符串或 block 数组两种形态都认）。
+fn first_message_text(data: &serde_json::Value) -> Option<String> {
+    let first = data.get("messages")?.as_array()?.first()?;
+    match first.get("content")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .find_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .map(String::from),
+        _ => None,
+    }
+}
+
+/// 这是不是「会话标题生成」（§5.5.4）。
+///
+/// 桌面端每开一个新会话都会来一发：451 in / 110 out，**其中 88 是思考 token** ——
+/// 它不带 output_config，上游按自己的默认档跑（Kimi 默认 high），只为起个标题。
+///
+/// 只认首条 user 消息的开头，不看 max_tokens —— 后者是实现细节，容易随版本变。
+pub(crate) fn is_title_generation(data: &serde_json::Value) -> bool {
+    first_message_text(data)
+        .map(|t| t.trim_start().starts_with(TITLE_PROMPT_PREFIX))
+        .unwrap_or(false)
+}
+
+/// 给标题生成用最省的思考设置。返回是否真的改了。
+///
+/// 桌面端已经明确指定 effort 时不动 —— 与 §3.10「透传优先」同一条原则。
+pub(crate) fn optimize_title_generation(data: &mut serde_json::Value) -> bool {
+    if request_effort(data).is_some() {
+        return false;
+    }
+    data["output_config"] = serde_json::json!({"effort": "low"});
+    data["thinking"] = serde_json::json!({"type": "disabled"});
+    true
+}
+
+/// 这是不是「连接健康检查」（§5.5.4）：`max_tokens=1`、正文一个点、无 system、无 tools。
+///
+/// 判定刻意从严 —— 宁可漏认（多花 8 个 token）也不能误认，
+/// 把用户真正的请求本地短路掉才是灾难。
+pub(crate) fn is_health_check(data: &serde_json::Value) -> bool {
+    if data.get("max_tokens").and_then(|v| v.as_u64()) != Some(1) {
+        return false;
+    }
+    if data.get("system").is_some() || data.get("tools").is_some() {
+        return false;
+    }
+    let Some(msgs) = data.get("messages").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    msgs.len() == 1 && first_message_text(data).map(|t| t.trim() == ".").unwrap_or(false)
+}
+
+/// 本地短路健康检查用的最小合法 Anthropic 响应。
+///
+/// usage 全 0 —— 这一发没打上游，不能记进任何账。
+pub(crate) fn health_check_reply(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "msg_modellink_healthcheck",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": "."}],
+        "stop_reason": "end_turn",
+        "stop_sequence": serde_json::Value::Null,
+        "usage": {"input_tokens": 0, "output_tokens": 0}
+    })
+}
+
 /// 整流器种类（§3.11）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Rectifier {
@@ -632,9 +705,34 @@ async fn proxy_fallback(
         None => ResolvedModel::default(),
     };
 
+    // §5.5.4 连接健康检查：本地短路，一个字节都不打上游（默认关，见 config 注释）
+    if config.short_circuit_health_check && is_health_check(&data) {
+        eprintln!("  健康检查：本地应答，未打上游");
+        push_log(
+            state.as_ref(),
+            LogEntry {
+                time: chrono_now(),
+                model: resolved.model.clone(),
+                status: 200,
+                thinking: String::new(),
+                note: "已优化：健康检查本地应答".to_string(),
+                error: false,
+            },
+        );
+        return (StatusCode::OK, Json(health_check_reply(&resolved.model))).into_response();
+    }
+
     // thinking 三态注入（§3.10：透传优先，服务商级设置只兜底）
     let mut thinking_log = inject_thinking(&mut data, &resolved.thinking_effort);
     let mut notes: Vec<&'static str> = Vec::new();
+
+    // §5.5.4 会话标题生成：起个标题不值得花 88 个思考 token
+    if config.optimize_title_gen && is_title_generation(&data) && optimize_title_generation(&mut data)
+    {
+        eprintln!("  标题生成：已降到 effort=low + thinking disabled");
+        notes.push("已优化：标题生成");
+        thinking_log = "low".to_string();
+    }
 
     if resolved.target_url.is_empty() {
         eprintln!("  error: no target URL configured for this model");
@@ -1177,6 +1275,100 @@ mod tests {
         assert!(!wants_stream(&serde_json::json!({"stream": false})));
         assert!(!wants_stream(&serde_json::json!({})));
         assert!(!wants_stream(&serde_json::json!({"stream": "true"})));
+    }
+
+    // ---- §5.5.4 两个隐藏调用的识别 ----
+
+    fn title_req() -> serde_json::Value {
+        serde_json::json!({
+            "model": "claude-opus-5",
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content":
+                "You are coming up with a succinct title for an agent conversation. …"}]
+        })
+    }
+
+    #[test]
+    fn title_generation_is_recognised_by_its_prompt_prefix() {
+        assert!(is_title_generation(&title_req()));
+        // 数组形态的 content 同样要认出来
+        let mut d = title_req();
+        d["messages"][0]["content"] = serde_json::json!([
+            {"type": "text", "text": "You are coming up with a succinct title for an agent…"}
+        ]);
+        assert!(is_title_generation(&d));
+    }
+
+    #[test]
+    fn ordinary_requests_are_not_mistaken_for_title_generation() {
+        assert!(!is_title_generation(&serde_json::json!({
+            "messages": [{"role": "user", "content": "帮我写个标题"}]
+        })));
+        // 只有首条 user 消息算数，别被后文里引用的同样文字骗了
+        assert!(!is_title_generation(&serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "随便聊聊"},
+                {"role": "user", "content": "You are coming up with a succinct title for…"}
+            ]
+        })));
+        assert!(!is_title_generation(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn title_generation_gets_the_cheapest_thinking_setting() {
+        // 起个标题花 88 个思考 token 是纯浪费（§5.5.4 抓包）
+        let mut d = title_req();
+        assert!(optimize_title_generation(&mut d));
+        assert_eq!(d["output_config"], serde_json::json!({"effort": "low"}));
+        assert_eq!(d["thinking"], serde_json::json!({"type": "disabled"}));
+    }
+
+    #[test]
+    fn title_optimization_respects_an_effort_the_desktop_already_set() {
+        // 与 §3.10 同一条原则：桌面端明确指定了就不动
+        let mut d = title_req();
+        d["output_config"] = serde_json::json!({"effort": "max"});
+        assert!(!optimize_title_generation(&mut d));
+        assert_eq!(d["output_config"], serde_json::json!({"effort": "max"}));
+    }
+
+    #[test]
+    fn health_check_is_recognised_by_its_exact_shape() {
+        let hc = serde_json::json!({
+            "model": "claude-opus-5",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "."}]
+        });
+        assert!(is_health_check(&hc));
+
+        // 带 system / tools / 多条消息 / 别的正文 / 别的 max_tokens 都不是
+        for tweak in [
+            serde_json::json!({"system": "x"}),
+            serde_json::json!({"tools": []}),
+            serde_json::json!({"max_tokens": 2}),
+        ] {
+            let mut d = hc.clone();
+            for (k, v) in tweak.as_object().unwrap() {
+                d[k] = v.clone();
+            }
+            assert!(!is_health_check(&d), "{d}");
+        }
+        let mut d = hc.clone();
+        d["messages"][0]["content"] = serde_json::json!("hi");
+        assert!(!is_health_check(&d));
+    }
+
+    #[test]
+    fn health_check_reply_is_a_valid_anthropic_message() {
+        let v = health_check_reply("claude-opus-5");
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["role"], "assistant");
+        assert_eq!(v["model"], "claude-opus-5");
+        assert_eq!(v["stop_reason"], "end_turn");
+        assert!(v["content"].as_array().unwrap()[0]["text"].is_string());
+        // 用量必须是 0 —— 这一发没打上游，不能记进任何账
+        assert_eq!(v["usage"]["input_tokens"], 0);
+        assert_eq!(v["usage"]["output_tokens"], 0);
     }
 
     // ---- §3.3 未映射槽位的 400 响应体 ----

@@ -210,6 +210,45 @@ export function SettingsPage() {
             </div>
           </div>
 
+          {/* 隐藏调用优化（§5.5.4） */}
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">标题生成省思考</div>
+              <div className="mt-px text-[11px] text-faint">
+                每开一个新会话，Claude 会发一次「起标题」请求，实测花掉 88 个思考 token。
+                开启后把它降到最低档，标题质量没有可见变化
+              </div>
+            </div>
+            <Switch
+              checked={draft?.optimize_title_gen ?? true}
+              disabled={!draft}
+              onCheckedChange={(ck) =>
+                updateDraft((c) => {
+                  c.optimize_title_gen = ck;
+                })
+              }
+            />
+          </div>
+
+          <div className="flex items-center justify-between border-t px-4 py-3">
+            <div className="pr-4">
+              <div className="text-[13px] font-medium">健康检查本地应答</div>
+              <div className="mt-px text-[11px] text-faint">
+                Claude 会定期发一个 1 token 的探活请求。开启后由 ModelLink 直接回复，不打上游
+                —— 只省 8 个 token，但上游真挂了也会显示正常，所以默认关
+              </div>
+            </div>
+            <Switch
+              checked={draft?.short_circuit_health_check ?? false}
+              disabled={!draft}
+              onCheckedChange={(ck) =>
+                updateDraft((c) => {
+                  c.short_circuit_health_check = ck;
+                })
+              }
+            />
+          </div>
+
           {/* 网络代理（2.1-E §3.9）：给挂梯子 / 公司代理的用户 */}
           <div className="flex flex-col gap-2 border-t px-4 py-3">
             <div>

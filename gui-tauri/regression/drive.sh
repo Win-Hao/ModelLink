@@ -81,6 +81,17 @@ curl -s -o "$OUT/nostream.body" -w "%{http_code}" -X POST "$B/v1/messages" \
   -H "content-type: application/json" \
   -d '{"model":"'"$S0"'","max_tokens":5,"metadata":{"user_id":"slow-stream"},"messages":[{"role":"user","content":"hi"}]}' > "$OUT/nostream.status"
 
+# 18) 会话标题生成 → 应被降到 effort=low + thinking disabled（§5.5.4）
+#     ⚠️ 有意不等价：v1 原样转发，上游按自己的默认档跑（Kimi 默认 high）。
+curl -s -o /dev/null -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":200,"metadata":{"user_id":"title-gen"},"messages":[{"role":"user","content":"You are coming up with a succinct title for an agent conversation."}]}'
+
+# 19) 连接健康检查 —— 开关默认关，所以应照常打到上游（与 v1 等价）
+curl -s -o /dev/null -X POST "$B/v1/messages" \
+  -H "content-type: application/json" \
+  -d '{"model":"'"$S0"'","max_tokens":1,"metadata":{"user_id":"health-check"},"messages":[{"role":"user","content":"."}]}'
+
 # ---- 以下用例会污染服务商能力缓存（§3.11.1），必须放在最后 ----
 
 # 16) 上游要求 thinking budget ≥ 1024 → 抬到 32000 重试（§3.11.2）

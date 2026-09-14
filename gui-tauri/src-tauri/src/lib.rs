@@ -13,6 +13,7 @@ mod commands;
 mod config;
 mod desktop_version;
 mod gateway;
+mod identity;
 mod models_dev;
 mod proxy;
 

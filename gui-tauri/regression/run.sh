@@ -111,6 +111,7 @@ DIVERGE = {
     "sig-reject":            "§3.11.3 thinking 块签名 → 剥掉后重试",
     "effort-reject-1":       "§3.11.1 上游拒收 output_config → 去掉重试",
     "effort-reject-2":       "§3.11.1 能力缓存命中，effort 直接不发",
+    "identity-note":         "2.2 身份说明换成这一次的真实模型",
 }
 
 def load(label):
@@ -254,6 +255,20 @@ check(t, len(recs) == 2
          and "output_config" in recs[0].get("body", {})
          and "output_config" not in recs[1].get("body", {}),
       "两次转发：第一次带 effort 被拒，第二次去掉后成功")
+
+# 2.2 身份说明：换成这一次的真实模型，别的代号一个不留；其它 system 块与消息原样
+t = "identity-note"
+recs = new.get(t, [])
+ok = len(recs) == 1
+if ok:
+    b, ob = recs[0]["body"], old.get(t, [{}])[0].get("body", {})
+    note = b["system"][1]["text"]
+    ok = ("你是 real-a，不是 Claude" in note
+          and "real-b" not in note and "claude-sonnet-5" not in note
+          and b["system"][0] == {"type": "text", "text": "You are a Claude agent."}
+          and b["messages"] == ob.get("messages")
+          and "claude-sonnet-5 = real-b" in ob["system"][1]["text"])
+check(t, ok, "说明里只剩这一次的模型（real-a），v1 对照原样转发全部映射")
 
 # §3.11.1 副作用：能力缓存命中，后续请求直接不发 effort
 t = "effort-reject-2"

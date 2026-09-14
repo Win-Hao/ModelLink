@@ -276,8 +276,9 @@ const ORG_INSTRUCTIONS_MAX: usize = 3000;
 ///
 /// **不做成设置项**：Chat 模式跑的是 Claude Code 引擎，系统提示词第 [1] 块是
 /// 第二人称角色断言（"You are a Claude agent…"），实测会让部分国产模型自称
-/// Claude；配上这段映射后 Kimi 能正确答出「我是 Kimi-k2.6，claude-opus-5 只是
-/// 网关路由槽位名」。用户没有理由关掉它，那就不该问。
+/// Claude。用户没有理由关掉它，那就不该问。
+///
+/// 文案与转发时的「换成这一次的真实模型」见 `identity` 模块。
 ///
 /// ⚠️ schema 是 `.trim().min(1)`：没有内容时必须**删键**，写空串会被拒，
 /// 而一条不合法就可能让整个配置文件失效。
@@ -288,20 +289,8 @@ fn write_org_instructions(existing: &mut serde_json::Value, slot_map: &[(String,
         }
         return;
     }
-    let text = clamp_utf16(&identity_note_text(slot_map), ORG_INSTRUCTIONS_MAX);
+    let text = clamp_utf16(&crate::identity::static_note(slot_map), ORG_INSTRUCTIONS_MAX);
     existing["organizationInstructions"] = serde_json::json!(text);
-}
-
-/// §3.7 的兜底文案：把槽位映射摊给模型。
-///
-/// 模型自己知道「我是 claude-opus-5」（系统提示词里的 `ps()` 会写明 exact model ID），
-/// 给出映射它就能反推出真实身份 —— 比笼统说一句「你不是 Claude」有效。
-fn identity_note_text(slot_map: &[(String, String)]) -> String {
-    let lines: Vec<String> = slot_map.iter().map(|(slot, name)| format!("{slot} = {name}")).collect();
-    format!(
-        "以下是 ModelLink 本地网关的槽位映射；系统提示词中出现的 Claude 模型名只是路由槽位，不代表你的真实身份：\n{}\n请按你实际对应的真实模型作答。",
-        lines.join("\n")
-    )
 }
 
 /// 按 UTF-16 码元截断（与 zod `.max` 的计数方式一致），并保证不切开字符。
@@ -734,16 +723,6 @@ mod tests {
         let s = existing["organizationInstructions"].as_str().unwrap();
         assert!(s.contains("claude-opus-5 = Kimi-k2.6"), "{s}");
         assert!(s.contains("claude-sonnet-5 = glm-5.1"), "{s}");
-        assert!(s.contains("路由槽位"), "{s}");
-    }
-
-    #[test]
-    fn identity_note_has_no_stray_indentation() {
-        // 这段文字会进模型的系统提示词 —— Rust 多行字符串的续行很容易把缩进带进去
-        let map = [("claude-opus-5".to_string(), "Kimi-k2.6".to_string())];
-        for line in identity_note_text(&map).lines() {
-            assert_eq!(line, line.trim(), "行首/行尾有多余空白: {line:?}");
-        }
     }
 
     // ---- §3.1 费率表 ----

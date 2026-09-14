@@ -684,6 +684,11 @@ async fn proxy_fallback(
             Ok(r) => {
                 eprintln!("  model: {} -> {} ({})", model, r.model, r.target_url);
                 data["model"] = serde_json::json!(r.model);
+                // 身份说明换成这一次的真实模型：Chat 模式的系统提示词里没有当前模型 ID，
+                // 只给全部映射的话模型不知道自己是哪一条（见 identity 模块）
+                if crate::identity::personalize(&mut data, &r.model) {
+                    eprintln!("  identity: 身份说明已换成 {}", r.model);
+                }
                 r
             }
             // §3.3：宁可报错也不静默换一个模型给用户

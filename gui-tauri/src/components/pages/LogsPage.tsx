@@ -133,7 +133,7 @@ function FailureNote({ entry }: { entry: LogEntry }) {
   const detail = entry.detail && (
     <code className="mono block text-[12px] break-all text-fg2">{entry.detail}</code>
   );
-  const tags = noteTags(entry.note).map((t) => t.text);
+  const tags = noteTags(entry.note).map((t) => t.raw);
   const bare = entry.slot.replace(/\[1m\]$/, "");
 
   let title: string;
@@ -142,14 +142,20 @@ function FailureNote({ entry }: { entry: LogEntry }) {
 
   if (tags.includes("未映射槽位")) {
     const stillInClaude = appliedQ.data?.models.some((m) => m.slot === bare);
-    title = `Claude 请求了 ${bare}，但这个槽位没有配置模型`;
+    title = "Claude 请求的模型，在 ModelLink 里没有对应";
     if (stillInClaude) {
-      body = "这个模型已经从 ModelLink 里删掉了，但 Claude Desktop 里还留着 —— 应用一次它就会消失。";
+      body = "这个模型已经从 ModelLink 里删掉了，但 Claude Desktop 里还留着。应用一次，它就会从 Claude 里消失。";
       action = { label: "去概览页应用 →", run: () => setPage("overview") };
     } else {
-      body =
-        "ModelLink 直接回了 400 —— 不会静默改用你的第一个模型，所以你看到的是报错而不是一个陌生模型的回答。";
-      action = { label: "去「服务商」页给这个槽位加一个模型 →", run: () => setPage("providers") };
+      // 槽位是按顺序自动分配的，没法「给这个槽位加模型」—— 能做的是在 Claude 里换一个模型
+      body = (
+        <>
+          多半是之前的对话还在用已经删掉的模型。在 Claude 里给这个对话重新选一个模型就行。ModelLink
+          直接报错，不会悄悄换成别的模型回答。
+          <code className="mono block text-[12px] text-fg3">Claude 请求的名字：{bare}</code>
+        </>
+      );
+      action = { label: "看看现在接了哪些模型 →", run: () => setPage("overview") };
     }
   } else if (tags.some((t) => t.startsWith("连不上服务商"))) {
     title = "连不上服务商";
@@ -157,7 +163,7 @@ function FailureNote({ entry }: { entry: LogEntry }) {
     action = { label: "去「服务商」页检查地址 →", run: toProvider };
   } else if (tags.some((t) => t.startsWith("服务商没填"))) {
     title = "这个模型所在的服务商还没填 API 地址";
-    body = "填上地址之后，这个槽位的请求就能发出去了。";
+    body = "填上地址之后，这个模型的请求就能发出去了。";
     action = { label: "去填地址 →", run: toProvider };
   } else if (entry.status === 401 || entry.status === 403) {
     title = `服务商拒绝了这个密钥（HTTP ${entry.status}）`;
@@ -275,7 +281,7 @@ export function LogsPage() {
       <div className="mb-3 flex flex-none items-center gap-1.5 overflow-hidden">
         {chip("all", "全部", entries.length)}
         {chip("failed", "仅失败", failedCount, true)}
-        {chip("rectified", "已整流", rectifiedCount)}
+        {chip("rectified", "已自动修复", rectifiedCount)}
         {topModels.map(([m, n]) => chip(`model:${m}`, m, n))}
       </div>
 
@@ -297,7 +303,7 @@ export function LogsPage() {
                 <>
                   还没有请求记录。Claude Desktop 发出的每个请求都会出现在这里。
                   <br />
-                  如果 Claude 里一直连不上、这里却一条都没有，多半是还没点「应用到 Claude Desktop」。
+                  如果 Claude 里一直连不上、这里却一条都没有，先去概览页看看哪一环没通。
                 </>
               ) : (
                 "这个筛选下没有记录"

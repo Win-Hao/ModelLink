@@ -269,14 +269,15 @@ export function modelOptions(
   return { options: [], source: "none" };
 }
 
+/** 默认思考深度下拉的选项名（给用户看，不带 low / max 这类参数名）。 */
 export const THINKING_LABELS: Record<string, string> = {
-  "": "默认（不干预）",
-  off: "关闭思考",
-  low: "轻量 (low)",
-  medium: "中等 (medium)",
-  high: "标准 (high)",
-  xhigh: "较高 (xhigh)",
-  max: "深度 (max)",
+  "": "按服务商默认",
+  off: "不思考",
+  low: "轻度",
+  medium: "中等",
+  high: "标准",
+  xhigh: "较深",
+  max: "深度",
 };
 
 /**

@@ -11,15 +11,33 @@ const BAD_NOTES = ["未映射槽位", "整流未生效", "整流后上游仍出�
 
 export type TagTone = "ok" | "bad" | "neutral";
 
-export function noteTags(note: string): { text: string; tone: TagTone }[] {
+/**
+ * 标记在界面上的说法。后端写的是开发者口径（「整流」「未映射槽位」，回归套件与错误响应体都按它比对），
+ * 这里只换显示文字，判定仍按原文。
+ */
+const NOTE_WORDS: [string, string][] = [
+  ["整流后上游仍出错", "自动修复后服务商仍报错"],
+  ["整流未生效", "自动修复没成功"],
+  ["已整流", "已自动修复"],
+  ["未映射槽位", "没有对应的模型"],
+  ["上游不认推理档位", "服务商不认思考深度"],
+  ["思考预算过小", "思考预算太小"],
+];
+
+function humanize(raw: string): string {
+  return NOTE_WORDS.reduce((t, [from, to]) => t.replace(from, to), raw);
+}
+
+export function noteTags(note: string): { raw: string; text: string; tone: TagTone }[] {
   return note
     .split(NOTE_SEPARATOR)
     .filter(Boolean)
-    .map((text) => ({
-      text,
-      tone: text.startsWith("已整流")
+    .map((raw) => ({
+      raw,
+      text: humanize(raw),
+      tone: raw.startsWith("已整流")
         ? "ok"
-        : BAD_NOTES.some((b) => text.startsWith(b))
+        : BAD_NOTES.some((b) => raw.startsWith(b))
           ? "bad"
           : "neutral",
     }));

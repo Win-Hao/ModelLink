@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Eye, EyeOff, Loader2, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ArrowUpRight, Eye, EyeOff, Loader2, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ModelPicker } from "@/components/ModelPicker";
@@ -32,7 +33,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { availableModels, testProvider, type ModelEntry } from "@/lib/ipc";
+import { availableModels, desktopInfo, type ModelEntry } from "@/lib/ipc";
 import {
   MAX_MODELS,
   ONE_M_CONTEXT,
@@ -41,6 +42,7 @@ import {
   formatContext,
   formatSince,
   getThinkingOptions,
+  keyPagesFor,
   modelOptions,
   providerDisplayName,
   totalModelsRaw,
@@ -49,7 +51,7 @@ import { useAppStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { verificationText, type Verification } from "@/lib/verification";
 
-// 模型区列宽（design-2.2.md §6.2）：模型 262 · 上下文 96 · 1M 变体 238 · Claude 里显示为 flex · 删除 32
+// 模型区列宽（design-2.2.md §6.2）：模型 262 · 上下文 96 · 1M 上下文 238 · 在 Claude 里 flex · 删除 32
 const COL = {
   model: "w-[262px] flex-none",
   ctx: "w-[96px] flex-none",
@@ -105,18 +107,27 @@ function KeyState({ verification, testing }: { verification?: Verification; test
   );
 }
 
-/** 1M 开关旁边那句话：装得下 / 装不下 / 不知道，各说各的。 */
-function OneMHint({ m, context }: { m: ModelEntry; context: number | null }) {
-  const cls = "truncate text-[11.5px] whitespace-nowrap";
+/** 1M 开关旁边那句话：开不了 / 已开启 / 可以开 / 不在清单里，各说各的。 */
+function OneMHint({ m, context, unlisted }: { m: ModelEntry; context: number | null; unlisted: boolean }) {
+  const cls = "truncate text-[12px] whitespace-nowrap";
   if (context !== null && context < ONE_M_CONTEXT) {
     return (
       <span className={cn(cls, m.to_1m ? "text-danger" : "text-fg3")}>
-        上限 {formatContext(context)}，装不下
+        最多 {formatContext(context)}，开不了
       </span>
     );
   }
-  if (m.to_1m) return <span className={cn(cls, "text-fg3")}>1M 上下文</span>;
-  return <span className={cn(cls, "text-fg3")}>{context === null ? "上限未知" : "支持 1M，未开启"}</span>;
+  // 手敲的名字不在服务商清单里：可能拼错了，而有的服务商对错名也照样回 200、换成默认模型 ——
+  // 「测试连接」证明不了它存在，只能在这里一直标着
+  if (unlisted) {
+    return (
+      <span className={cn(cls, "text-accent")} title="服务商的模型清单里没有这个名字。拼错了的话，有的服务商会悄悄换成默认模型回答。">
+        清单里没有这个名字
+      </span>
+    );
+  }
+  if (m.to_1m) return <span className={cn(cls, "text-fg3")}>已开启</span>;
+  return <span className={cn(cls, "text-fg3")}>{context === null ? "不确定能不能开" : "可以开"}</span>;
 }
 
 /** 服务商编辑器（design-2.2.md §6.2）：面板头 · 两个字段 · 模型表 · 推理强度说明。 */
@@ -124,30 +135,32 @@ export function ProviderEditor({ index }: { index: number }) {
   const {
     draft,
     updateDraft,
-    focusKeyNonce,
+    focusRequest,
     setSelectedProvider,
     applyState,
     verificationFor,
-    recordVerification,
+    testProviders,
+    isTesting,
     modelPickRequest,
     clearModelPickRequest,
   } = useAppStore();
+  const infoQ = useQuery({ queryKey: ["desktop-info"], queryFn: desktopInfo });
 
   const [showKey, setShowKey] = useState(false);
-  const [testing, setTesting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // 要自动展开的那一行（刚加出来的空行）；nonce 保证同一行也能再次触发
   const [pickSignal, setPickSignal] = useState<{ row: number; nonce: number } | null>(null);
 
-  // 预设引导流：跳入本页时聚焦密钥输入框
+  // 预设引导流 / 「去填 API 密钥」：跳入本页时聚焦对应的输入框
+  const urlRef = useRef<HTMLInputElement>(null);
   const keyRef = useRef<HTMLInputElement>(null);
-  const handledFocusNonce = useRef(0);
+  const handledFocus = useRef(0);
   useEffect(() => {
-    if (focusKeyNonce > handledFocusNonce.current) {
-      handledFocusNonce.current = focusKeyNonce;
-      keyRef.current?.focus();
+    if (focusRequest && focusRequest.provider === index && focusRequest.nonce > handledFocus.current) {
+      handledFocus.current = focusRequest.nonce;
+      (focusRequest.field === "url" ? urlRef : keyRef).current?.focus();
     }
-  }, [focusKeyNonce]);
+  }, [focusRequest, index]);
 
   // 切换服务商时清掉编辑器瞬态
   useEffect(() => {
@@ -178,7 +191,11 @@ export function ProviderEditor({ index }: { index: number }) {
 
   const name = providerDisplayName(p.target_url, index);
   const verification = verificationFor(p);
+  const testing = isTesting(p);
   const busy = applyState === "applying";
+  const keyPages = keyPagesFor(p.target_url);
+  // 老版 Claude 不认 labelOverride：选择器里看到的是槽位名，得告诉用户
+  const slotShown = !!infoQ.data?.unavailable.includes("labelOverride");
   const capReached = totalModelsRaw(draft) >= MAX_MODELS;
   const { options, source } = modelOptions(p.target_url, liveModels.data);
   const caption =
@@ -187,7 +204,7 @@ export function ProviderEditor({ index }: { index: number }) {
           draft.pricing_synced_at ? `，${formatSince(draft.pricing_synced_at)}同步` : ""
         }`
       : source === "none"
-        ? "这家服务商没有现成的清单 —— 在上面直接输入模型名"
+        ? "这家服务商没有现成的清单，在上面直接输入模型名"
         : `${name} 的常用模型 · 还没从 models.dev 同步到最新清单`;
 
   // 槽位以真实展开结果为准（跳过没填名字的行、封顶 MAX_MODELS），不按行号推
@@ -196,19 +213,11 @@ export function ProviderEditor({ index }: { index: number }) {
   const withoutPicker = mine.filter((f) => f.efforts.length === 0).length;
 
   const runTest = async () => {
-    const model = p.models.find((m) => m.name)?.name;
-    if (!p.target_url || !p.api_key || !model) {
+    if (!p.target_url || !p.api_key || !p.models.some((m) => m.name)) {
       toast.error("先填好 API 地址、密钥和至少一个模型，再测试连接");
       return;
     }
-    setTesting(true);
-    try {
-      const r = await testProvider(p.target_url, p.api_key, model);
-      recordVerification(p, { ok: r.ok, at: Date.now(), message: r.message });
-    } catch (e) {
-      recordVerification(p, { ok: false, at: Date.now(), message: String(e) });
-    }
-    setTesting(false);
+    await testProviders([index]);
   };
 
   const removeProvider = () => {
@@ -254,8 +263,9 @@ export function ProviderEditor({ index }: { index: number }) {
       {/* 字段区：两栏等宽，同高同形同基线 */}
       <div className="grid flex-none grid-cols-2 gap-5 border-b border-hair px-[22px] pt-[18px] pb-5">
         <label className="flex min-w-0 flex-col gap-[7px]">
-          <span className="text-label text-fg3">API 地址</span>
+          <span className="flex h-4 items-center text-label text-fg3">API 地址</span>
           <Input
+            ref={urlRef}
             value={p.target_url}
             onChange={(e) =>
               updateDraft((c) => {
@@ -267,11 +277,34 @@ export function ProviderEditor({ index }: { index: number }) {
             className="h-9"
           />
         </label>
-        <label className="flex min-w-0 flex-col gap-[7px]">
-          <span className="text-label text-fg3">API 密钥</span>
+        <div className="flex min-w-0 flex-col gap-[7px]">
+          {/* 两栏标签行同高：右边多了拿密钥的链接，也不能把输入框往下挤（同高同形同基线） */}
+          <span className="flex h-4 items-center">
+            <label htmlFor={`api-key-${index}`} className="text-label text-fg3">
+              API 密钥
+            </label>
+            {keyPages.length > 0 && (
+              <span className="ml-auto flex items-center gap-2 text-[12px] text-fg3">
+                {keyPages.length > 1 && <span>去后台拿密钥：</span>}
+                {keyPages.map((k) => (
+                  <button
+                    key={k.url}
+                    type="button"
+                    onClick={() => void openUrl(k.url)}
+                    title={k.url}
+                    className="flex items-center gap-0.5 rounded-[4px] transition-colors outline-none hover:text-fg focus-visible:ring-[3px] focus-visible:ring-ring/40"
+                  >
+                    {k.plan ?? `去 ${name} 后台拿密钥`}
+                    <ArrowUpRight className="size-3" />
+                  </button>
+                ))}
+              </span>
+            )}
+          </span>
           <span className="relative">
             <Input
               ref={keyRef}
+              id={`api-key-${index}`}
               type={showKey ? "text" : "password"}
               value={p.api_key}
               onChange={(e) =>
@@ -292,7 +325,7 @@ export function ProviderEditor({ index }: { index: number }) {
               {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
           </span>
-        </label>
+        </div>
       </div>
 
       {/* 模型区 */}
@@ -301,10 +334,10 @@ export function ProviderEditor({ index }: { index: number }) {
           模型 · <span className="mono ml-1">{p.models.length}</span> 个
         </div>
         <div className="flex h-[26px] flex-none items-center border-b border-hair text-label text-fg3">
-          <span className={COL.model}>{source === "none" ? "模型名" : "模型（从 MODELS.DEV 清单选）"}</span>
+          <span className={COL.model}>模型</span>
           <span className={COL.ctx}>上下文</span>
-          <span className={COL.oneM}>1M 变体</span>
-          <span className={COL.slot}>CLAUDE 里显示为</span>
+          <span className={COL.oneM}>1M 上下文</span>
+          <span className={COL.slot}>在 Claude 里</span>
           <span className={COL.del} />
         </div>
 
@@ -315,10 +348,13 @@ export function ProviderEditor({ index }: { index: number }) {
             const context = m.context_limit ?? options.find((o) => o.id === m.name)?.context ?? null;
             // 装不下 1M：在源头拦住。已经开着的（老配置）允许关，关上之后就不能再开
             const cannotHold = context !== null && context < ONE_M_CONTEXT;
+            // 有清单时，手敲进来、清单里又没有的名字一直标着（清单来源见 modelOptions）
+            const unlisted = !!m.name && options.length > 0 && !options.some((o) => o.id === m.name);
             return (
               <div key={mi} className="flex h-[50px] items-center border-b border-hair last:border-b-0">
                 <span className={COL.model}>
                   <ModelPicker
+                    label={m.name ? `模型：${m.name}` : `第 ${mi + 1} 行模型，还没选`}
                     value={m.name}
                     options={options}
                     caption={caption}
@@ -348,26 +384,34 @@ export function ProviderEditor({ index }: { index: number }) {
                         e.to_1m = ck ? "auto" : "";
                       })
                     }
-                    aria-label="1M 变体"
+                    aria-label={`${m.name || `第 ${mi + 1} 行模型`} 开启 1M 上下文`}
                   />
-                  <OneMHint m={m} context={context} />
+                  <OneMHint m={m} context={context} unlisted={unlisted} />
                 </span>
                 <span className={cn(COL.slot, "text-[12.5px] text-fg2")}>
                   {slot ? (
-                    <>
-                      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden className="flex-none text-hair2 dark:text-white/15">
-                        <path d="M2.5 7h9m-3.3-3.3L11.5 7l-3.3 3.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      <b className="mono truncate font-medium text-fg">{slot.slot}</b>
-                      <span className="flex-none text-[11.5px] text-fg3">
-                        · {slot.efforts.length > 0 ? `${slot.efforts.length} 档强度` : "无强度选择"}
-                      </span>
-                    </>
+                    <span
+                      className="truncate"
+                      title={
+                        slot.efforts.length > 0
+                          ? `Claude 内部用的名字：${slot.slot}`
+                          : `Claude 只给排在前面的 6 个模型提供思考深度选择。Claude 内部用的名字：${slot.slot}`
+                      }
+                    >
+                      {slot.efforts.length > 0 ? `可调思考深度 · ${slot.efforts.length} 档` : (
+                        <span className="text-fg3">不可调思考深度</span>
+                      )}
+                      {slotShown && (
+                        <span className="text-fg3">
+                          {" "}· 显示为 <span className="mono text-fg2">{slot.slot}</span>
+                        </span>
+                      )}
+                    </span>
                   ) : m.name ? (
                     // 超出 20 个的模型不会写进 Claude —— 说出来，别让它静默消失
-                    <span className="truncate text-[11.5px] text-danger">超出 {MAX_MODELS} 个上限，不会出现在 Claude 里</span>
+                    <span className="truncate text-[12px] text-danger">超出 {MAX_MODELS} 个上限，不会出现在 Claude 里</span>
                   ) : (
-                    <span className="truncate text-[11.5px] text-fg3">选好模型后分配</span>
+                    <span className="truncate text-[12px] text-fg3">选好模型后出现在 Claude 里</span>
                   )}
                 </span>
                 <span className={COL.del}>
@@ -419,21 +463,15 @@ export function ProviderEditor({ index }: { index: number }) {
         </div>
       </div>
 
-      {/* 面板脚：把「为什么这里没有推理强度设置」说出来 */}
-      {mine.length > 0 && (
+      {/* 面板脚：只在有事可做时出现 —— 全都能在 Claude 里调思考深度时，这里没有要决定的东西 */}
+      {mine.length > 0 && (withoutPicker > 0 || p.thinking_effort !== "") && (
         <div className="flex min-h-[46px] flex-none items-center gap-3 border-t border-hair px-[22px] py-2">
           {withoutPicker === 0 ? (
-            p.thinking_effort === "" ? (
-              <span className="text-[12px] leading-[1.55] text-fg3">
-                这家的 {mine.length} 个模型都落在有强度选择器的槽位上 —— 档位由 Claude
-                每次对话时决定，这里不需要设默认值。
-              </span>
-            ) : (
-              // 下拉已经没用了，但配置里还留着旧值：它对不带强度的内部请求仍然生效，得给个清除入口
-              <>
+            // 下拉已经没用了，但配置里还留着旧值：它对不带强度的内部请求仍然生效，得给个清除入口
+            <>
                 <span className="text-[12px] leading-[1.55] text-fg3">
-                  这里还留着以前设的默认档「{THINKING_LABELS[p.thinking_effort] ?? p.thinking_effort}」——
-                  这家的模型在 Claude 里都能逐次选档位，它基本不起作用了。
+                  这里还留着以前设的默认思考深度「{THINKING_LABELS[p.thinking_effort] ?? p.thinking_effort}」。这家的模型在
+                  Claude 里都能自己选，它基本用不上了。
                 </span>
                 <Button
                   variant="ghost"
@@ -447,13 +485,12 @@ export function ProviderEditor({ index }: { index: number }) {
                 >
                   清除
                 </Button>
-              </>
-            )
+            </>
           ) : (
             <>
               <span className="text-[12px] leading-[1.55] text-fg3">
-                {withoutPicker === mine.length ? "这家的模型" : `其中 ${withoutPicker} 个模型`}
-                落在没有强度选择器的槽位上 —— 它们的推理强度按这里的默认档来。
+                {withoutPicker === mine.length ? "这家的模型" : `其中 ${withoutPicker} 个模型`}在 Claude
+                里不能调思考深度，按这里的默认档来。
               </span>
               <Select
                 value={p.thinking_effort === "" ? "default" : p.thinking_effort}

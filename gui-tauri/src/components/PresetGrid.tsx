@@ -7,10 +7,17 @@ const SHORT_NAMES: Record<string, string> = {
   "kimi-code": "Kimi Code",
   kimi: "Kimi 开放平台",
   minimax: "MiniMax",
-  "qwen-coding": "百炼 Coding",
-  "qwen-token": "百炼 Token",
+  "qwen-coding": "百炼 Coding Plan",
+  "qwen-token": "百炼 Token Plan",
   glm: "GLM（智谱）",
   mimo: "mimo",
+};
+
+// 同一家有两条产品线、图标一模一样时，格子上把区别写出来（取自预设全名，不另编）。
+// 跟着视频配置的人，要能一眼认出该点哪一个。
+const PLAN_NOTES: Record<string, string> = {
+  "kimi-code": "订阅制",
+  kimi: "按量付费",
 };
 
 const tile = "flex min-w-0 items-center gap-[11px] rounded-md px-[15px] py-3.5 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40";
@@ -36,9 +43,13 @@ export function PresetGrid({
             <span className="min-w-0">
               <span className="block text-[13px] font-semibold tracking-[-0.012em]">{name}</span>
               {configured?.has(p.id) ? (
-                <span className="mt-[3px] block truncate text-[11px] text-fg3">已添加 · 点这里加模型</span>
+                <span className="mt-[3px] block truncate text-[12px] text-fg3">已添加 · 点这里加模型</span>
+              ) : PLAN_NOTES[p.id] ? (
+                <span className="mt-[3px] block truncate text-[12px] text-fg3">
+                  {PLAN_NOTES[p.id]} · <span className="mono">{presetHost(p)}</span>
+                </span>
               ) : (
-                <span className="mono mt-[3px] block truncate text-[11px] text-fg3">{presetHost(p)}</span>
+                <span className="mono mt-[3px] block truncate text-[12px] text-fg3">{presetHost(p)}</span>
               )}
             </span>
           </button>
@@ -48,7 +59,7 @@ export function PresetGrid({
         <ProviderAvatar letter="?" size={32} tone="accent" />
         <span className="min-w-0">
           <span className="block text-[13px] font-semibold tracking-[-0.012em]">自定义</span>
-          <span className="mt-[3px] block truncate text-[11px] text-fg3">手动填写地址</span>
+          <span className="mt-[3px] block truncate text-[12px] text-fg3">手动填写地址</span>
         </span>
       </button>
     </div>

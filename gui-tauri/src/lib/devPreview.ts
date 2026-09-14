@@ -37,6 +37,8 @@ let store: Config = {
   last_applied_hash: "",
   last_applied_at: String(now - 4 * 3600),
   last_applied_pool: "2.1",
+  // ?legacy → 2.2 之前应用的（后端不知道当时的端口，前端退回按哈希判断）
+  last_applied_port: new URLSearchParams(location.search).has("legacy") ? undefined : 5678,
 };
 
 // ?many=1 → 20 个模型 / 6 家服务商（看长表滚动）
@@ -72,12 +74,45 @@ function snapshot(c: Config): AppliedState {
     models: flattenModels(c).map((m) => ({ slot: m.slot, label: m.name, supports_1m: m.to1m })),
   };
 }
+/** 写进 Claude 的费率表的指纹（后端是逐值比对；预览里比 JSON 就够了） */
+function pricingSig(c: Config): string {
+  return JSON.stringify(flattenModels(c).map((m) => c.providers[m.providerIndex].models[m.modelIndex].pricing_synced ?? null));
+}
 let applied = snapshot(store);
+let appliedPricing = pricingSig(store);
 
 // ?empty=1 → 空配置（预览首启引导页）；?dirty=1 → 初始即 dirty（最后一个模型是应用之后才加的）
 const params = new URLSearchParams(location.search);
 if (params.has("empty")) {
   store = { providers: [], last_applied_hash: "", last_applied_at: "" };
+}
+// ?firstrun → 刚从引导页点了 Kimi Code：密钥还空着，从没应用过，Claude 那边也还没有配置
+if (params.has("firstrun")) {
+  store = {
+    providers: [
+      {
+        target_url: "https://api.kimi.com/coding/",
+        api_key: "",
+        models: [
+          { name: "k3", to_1m: "", context_limit: 1_048_576 },
+          { name: "k3-256k", to_1m: "", context_limit: 262_144 },
+        ],
+        thinking_effort: "",
+      },
+    ],
+    last_applied_hash: "",
+    last_applied_at: "",
+  };
+  applied = { found: false, provider: "", gateway_url: "", models: [] };
+}
+// ?keyonly → 应用之后只换了密钥：哈希变了，但 Claude 那边什么都不欠（「已保存，立即生效」）
+if (params.has("keyonly")) {
+  store.last_applied_hash = "stale";
+}
+// ?pricing → models.dev 同步来了新价，Claude 里的费率表还是旧的
+if (params.has("pricing")) {
+  appliedPricing = "stale";
+  store.last_applied_hash = "stale";
 }
 if (params.has("dirty")) {
   store.last_applied_hash = "stale";
@@ -116,6 +151,7 @@ function mockHash(c: Config): string {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let portDown = params.has("portdown");
 
 mockIPC(async (cmd, payload) => {
   const args = payload as Record<string, unknown>;
@@ -126,6 +162,8 @@ mockIPC(async (cmd, payload) => {
       const next = structuredClone(args.config as Config);
       next.last_applied_hash = store.last_applied_hash;
       next.last_applied_at = store.last_applied_at;
+      next.last_applied_port = store.last_applied_port;
+      next.port = store.port;
       store = next;
       // 与后端一致：返回合并后的那份，前端据它算 dirty
       return next;
@@ -151,9 +189,12 @@ mockIPC(async (cmd, payload) => {
       return "2.0.0";
     case "apply_to_claude":
       await sleep(1200);
+      if (store.providers.some((p) => !p.api_key)) throw "Provider 1 has no API key.";
       store.last_applied_hash = mockHash(store);
       store.last_applied_at = String(Math.floor(Date.now() / 1000));
+      store.last_applied_port = store.port ?? 5678;
       applied = snapshot(store);
+      appliedPricing = pricingSig(store);
       return "Applied! Claude Desktop is restarting...";
     case "test_provider":
       await sleep(700);
@@ -161,7 +202,7 @@ mockIPC(async (cmd, payload) => {
     case "force_quit_and_relaunch":
       return null;
     case "proxy_status":
-      return { running: !params.has("portdown"), port: store.port ?? 5678 };
+      return { running: !portDown, port: store.port ?? 5678 };
     case "available_models": {
       const url = String(args.targetUrl ?? "");
       if (url.includes("deepseek"))
@@ -181,10 +222,22 @@ mockIPC(async (cmd, payload) => {
     }
     case "applied_state":
       return applied;
+    case "pending_apply": {
+      const port = store.port ?? 5678;
+      return {
+        found: applied.found,
+        gateway: applied.provider !== "gateway" || applied.gateway_url !== `http://127.0.0.1:${port}`,
+        port_changed: store.last_applied_port === undefined ? null : store.last_applied_port !== port,
+        pricing: applied.found && appliedPricing !== pricingSig(store),
+      };
+    }
     case "reveal_claude_config":
       return null;
     case "desktop_info":
-      return { version: "1.46388.3", unavailable: [] };
+      // ?oldclaude → 老版 Claude 不认 labelOverride，选择器里显示的是槽位名
+      return params.has("oldclaude")
+        ? { version: "1.2000.0", unavailable: ["labelOverride", "inferenceModelPricingEnabled", "inferenceModelPricing"] }
+        : { version: "1.46388.3", unavailable: [] };
     case "sync_pricing": {
       await sleep(600);
       return { ok: true, changed: 2, skipped: false, message: "", synced_at: String(Math.floor(Date.now() / 1000)) };
@@ -192,6 +245,9 @@ mockIPC(async (cmd, payload) => {
     case "set_port": {
       await sleep(400);
       store.port = args.port as number;
+      portDown = false;
+      // 后端 set_port 会立刻改写 Claude 配置里的网关地址（但 Claude 要重启才用上）
+      applied = { ...applied, gateway_url: `http://127.0.0.1:${store.port}` };
       return { running: true, port: store.port };
     }
     case "plugin:app|version":

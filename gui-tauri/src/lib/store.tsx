@@ -15,9 +15,12 @@ import {
   appliedState,
   configHash,
   getConfig,
+  pendingApply,
   saveConfig,
   setPort as ipcSetPort,
+  testProvider,
   type Config,
+  type PendingApply,
   type Provider,
 } from "@/lib/ipc";
 import {
@@ -41,8 +44,11 @@ import {
 // ============================================================
 // 全局应用状态：配置草稿 + 自动保存(400ms) + 应用状态机 + 页面导航。
 // 状态机四态（design-2.2.md §7）：clean / dirty / applying / error。
-// dirty = 配置改过（canonical hash ≠ last_applied_hash，Rust 单一实现）
-//       或 Claude Desktop 实际写着的槽位映射和这里对不上（读回网关配置逐条比）。
+//
+// dirty（要应用）看的是 Claude Desktop 那边真正写着的东西，不是配置哈希：
+//   槽位 / 显示名 / 1M 对不上（读回网关配置逐条比）、网关地址或端口对不上、费率表过期。
+// 只改了密钥 / 地址 / 默认档时代理当场就用上了，不算 dirty —— 不必为它重启一次 Claude。
+// 例外：2.2 之前应用的（后端不知道当时的端口）退回按哈希判断，应用一次之后就按上面的规则。
 // ============================================================
 
 export type Page = "overview" | "providers" | "logs" | "settings";
@@ -66,13 +72,22 @@ type Store = {
   pendingSlots: ReadonlySet<string>;
   /** 对不上的条数：上面那些槽位 + Claude 里还留着、这里已经删掉的。 */
   pendingCount: number;
+  /** 槽位之外还欠 Claude 的：网关地址、端口、费率表（后端读回判断）；没读到为 null。 */
+  pendingApply: PendingApply | null;
+  /** 改过、已经保存并且当场生效（密钥 / 地址 / 默认档），不需要应用。 */
+  savedLive: boolean;
 
   page: Page;
   setPage: (p: Page) => void;
   selectedProvider: number;
   setSelectedProvider: (i: number) => void;
-  /** 自增序号：跳转服务商页后聚焦 API 密钥输入框（预设引导流）。 */
-  focusKeyNonce: number;
+  /** 服务商页待聚焦的字段（预设引导流、「去填 API 密钥」）；nonce 保证同一字段能再次触发。 */
+  focusRequest: { provider: number; field: "url" | "key"; nonce: number } | null;
+  /** 跳到服务商页并聚焦某个字段。 */
+  gotoProviderField: (index: number, field: "url" | "key") => void;
+  /** 自增序号：设置页收到后滚到并聚焦端口输入框（「换一个端口」）。 */
+  focusPortNonce: number;
+  gotoPort: () => void;
   /** 「添加服务商」预设网格弹窗（顶栏 [+] 与服务商页共用）。 */
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
@@ -84,11 +99,21 @@ type Store = {
   /** 服务商页待打开的模型选择器（哪家、第几行）；编辑器处理完调 `clearModelPickRequest`。 */
   modelPickRequest: { provider: number; row: number } | null;
   clearModelPickRequest: () => void;
+  /** 跳到服务商页并展开某一行的模型选择器（「去选模型」）。 */
+  gotoModelPick: (provider: number, row: number) => void;
   /** 链路板行点击 → 服务商页选中。 */
   gotoProvider: (index: number) => void;
   /** 这个服务商（按地址 + 密钥）上次「测试连接」的结论；没测过为 undefined。跨会话保留。 */
   verificationFor: (p: Provider) => Verification | undefined;
   recordVerification: (p: Provider, v: Verification) => void;
+  /** 测一遍这些服务商（下标；缺省 = 全部填完整的）。结论写进 verification。 */
+  testProviders: (indices?: number[]) => Promise<void>;
+  /** 正在测试的服务商（按地址 + 密钥）。 */
+  isTesting: (p: Provider) => boolean;
+  /** 首次应用成功后的交接卡片：告诉用户去 Claude 里选哪个模型（Windows 还有手动那一步）。 */
+  handoff: { model: string } | null;
+  showHandoff: () => void;
+  dismissHandoff: () => void;
   /** 端口热切换：成功后同步草稿 port + 刷新状态 + dirty 重算。 */
   changePort: (port: number) => Promise<void>;
   /** 先落盘未保存的编辑，再从后端重新读配置覆盖草稿（费率同步等「后端专管」字段变化后调用）。 */
@@ -119,9 +144,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     refetchOnWindowFocus: true,
   });
 
+  const pendingQuery = useQuery({
+    queryKey: ["pending-apply"],
+    queryFn: pendingApply,
+    refetchOnWindowFocus: true,
+  });
+
   const [page, setPage] = useState<Page>("overview");
   const [selectedProvider, setSelectedProvider] = useState(0);
-  const [focusKeyNonce, setFocusKeyNonce] = useState(0);
+  const [focusRequest, setFocusRequest] = useState<Store["focusRequest"]>(null);
+  const [focusPortNonce, setFocusPortNonce] = useState(0);
+  const [testing, setTesting] = useState<ReadonlySet<string>>(new Set());
+  const [handoff, setHandoff] = useState<Store["handoff"]>(null);
   const [modelPickRequest, setModelPickRequest] = useState<{ provider: number; row: number } | null>(
     null,
   );
@@ -163,10 +197,12 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         // 空配置无可应用，不算 dirty
         setDirty(saved.providers.length > 0 && h !== (saved.last_applied_hash ?? ""));
       }
+      // 后端按刚保存的配置重新比对 Claude 那边（费率表跟着模型走）
+      void qc.invalidateQueries({ queryKey: ["pending-apply"] });
     } catch (e) {
       toast.error(`保存失败：${String(e)}`);
     }
-  }, []);
+  }, [qc]);
 
   const updateDraft = useCallback(
     (fn: (c: Config) => void) => {
@@ -185,6 +221,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   const apply = useCallback(() => {
     if (applying || !draftRef.current) return;
+    // 第一次接入：成功后回概览页，告诉用户去 Claude 里选哪个模型
+    const firstApply = !draftRef.current.last_applied_at;
     setApplying(true);
     setApplyError(null);
     void (async () => {
@@ -199,8 +237,16 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         const h = await configHash(fresh);
         setDirty(h !== (fresh.last_applied_hash ?? ""));
         await qc.invalidateQueries({ queryKey: ["applied-state"] });
+        await qc.invalidateQueries({ queryKey: ["pending-apply"] });
         setFlashNonce((n) => n + 1);
-        toast.success("已应用，Claude Desktop 正在重启...");
+        if (firstApply) {
+          // 第一次接入由概览页的交接卡片来说（下一步去 Claude 里选哪个模型），不再弹 toast
+          const first = flattenModels(fresh)[0];
+          if (first) setHandoff({ model: first.name });
+          setPage("overview");
+        } else {
+          toast.success("已应用，Claude Desktop 正在重启…");
+        }
       } catch (e) {
         const msg = applyErrorText(String(e), draftRef.current);
         setApplyError(msg);
@@ -258,16 +304,33 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       });
       setSelectedProvider(newIndex);
       setPage("providers");
-      setFocusKeyNonce((n) => n + 1);
+      setFocusRequest({ provider: newIndex, field: preset === "custom" ? "url" : "key", nonce: Date.now() });
     },
     [updateDraft],
   );
 
   const clearModelPickRequest = useCallback(() => setModelPickRequest(null), []);
 
+  const gotoModelPick = useCallback((provider: number, row: number) => {
+    setSelectedProvider(provider);
+    setPage("providers");
+    setModelPickRequest({ provider, row });
+  }, []);
+
   const gotoProvider = useCallback((index: number) => {
     setSelectedProvider(index);
     setPage("providers");
+  }, []);
+
+  const gotoProviderField = useCallback((index: number, field: "url" | "key") => {
+    setSelectedProvider(index);
+    setPage("providers");
+    setFocusRequest({ provider: index, field, nonce: Date.now() });
+  }, []);
+
+  const gotoPort = useCallback(() => {
+    setPage("settings");
+    setFocusPortNonce((n) => n + 1);
   }, []);
 
   const verificationFor = useCallback(
@@ -283,6 +346,40 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const testProviders = useCallback(
+    async (indices?: number[]) => {
+      const providers = draftRef.current?.providers ?? [];
+      const targets = (indices ?? providers.map((_, i) => i))
+        .map((i) => providers[i])
+        .filter((p): p is Provider => !!p && !!p.target_url && !!p.api_key && p.models.some((m) => m.name));
+      const keys = targets.map(verificationKey);
+      setTesting((cur) => new Set([...cur, ...keys]));
+      await Promise.all(
+        targets.map(async (p) => {
+          // 测第一个有名字的模型：密钥和地址对不对，一个模型就能说明
+          const model = p.models.find((m) => m.name)!.name;
+          try {
+            const r = await testProvider(p.target_url, p.api_key, model);
+            recordVerification(p, { ok: r.ok, at: Date.now(), message: r.message });
+          } catch (e) {
+            recordVerification(p, { ok: false, at: Date.now(), message: String(e) });
+          }
+        }),
+      );
+      setTesting((cur) => new Set([...cur].filter((k) => !keys.includes(k))));
+    },
+    [recordVerification],
+  );
+
+  const isTesting = useCallback((p: Provider) => testing.has(verificationKey(p)), [testing]);
+
+  const showHandoff = useCallback(() => {
+    const first = draftRef.current ? flattenModels(draftRef.current)[0] : undefined;
+    setHandoff({ model: first?.name ?? "" });
+    setPage("overview");
+  }, []);
+  const dismissHandoff = useCallback(() => setHandoff(null), []);
+
   const changePort = useCallback(
     async (port: number) => {
       const status = await ipcSetPort(port); // 失败抛错，由调用方 toast
@@ -290,9 +387,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       await qc.invalidateQueries({ queryKey: ["proxy-status"] });
       await qc.invalidateQueries({ queryKey: ["config"] });
       await qc.invalidateQueries({ queryKey: ["applied-state"] });
+      await qc.invalidateQueries({ queryKey: ["pending-apply"] });
       // 端口参与 canonical hash：切换后触发 dirty 重算（提示重新应用）
       window.setTimeout(() => void flushSave(), 0);
-      toast.success(`代理已切换到 127.0.0.1:${status.port}，请重新应用到 Claude Desktop`);
+      toast.success(`代理已切换到 127.0.0.1:${status.port}，应用一次 Claude 才会连到新端口`);
     },
     [flushSave, qc],
   );
@@ -309,6 +407,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setDraft(structuredClone(fresh));
     const h = await configHash(fresh);
     setDirty(fresh.providers.length > 0 && h !== (fresh.last_applied_hash ?? ""));
+    await qc.invalidateQueries({ queryKey: ["pending-apply"] });
   }, [flushSave, qc]);
 
   const diff =
@@ -317,11 +416,20 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   // 空配置无可应用（apply 会校验失败），Claude 里残留的旧条目也不算
   const pendingCount = diff && draft!.providers.length > 0 ? diff.pending.size + diff.removed : 0;
 
+  const pa = pendingQuery.data ?? null;
+  const hasProviders = !!draft && draft.providers.length > 0;
+  // 后端知道上次应用时的端口 = 2.2 之后应用过，可以完全按 Claude 实际写着的判断；
+  // 否则（老版本应用的 / 从没应用过）哈希变了就算要应用，宁可多提示一次
+  const byClaude = !!pa && pa.port_changed !== null;
+  const otherPending = !!pa && (pa.gateway || pa.pricing || pa.port_changed === true);
+  const needsApply = hasProviders && (pendingCount > 0 || otherPending || (!byClaude && dirty));
+  const savedLive = hasProviders && dirty && byClaude && !needsApply;
+
   const applyState: ApplyState = applying
     ? "applying"
     : applyError
       ? "error"
-      : dirty || pendingCount > 0
+      : needsApply
         ? "dirty"
         : "clean";
 
@@ -338,19 +446,30 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         appliedKnown: !!appliedQuery.data,
         pendingSlots,
         pendingCount,
+        pendingApply: pa,
+        savedLive,
         page,
         setPage,
         selectedProvider,
         setSelectedProvider,
-        focusKeyNonce,
+        focusRequest,
+        gotoProviderField,
+        focusPortNonce,
+        gotoPort,
         modelPickRequest,
         clearModelPickRequest,
+        gotoModelPick,
         pickerOpen,
         setPickerOpen,
         addProviderFromPreset,
         gotoProvider,
         verificationFor,
         recordVerification,
+        testProviders,
+        isTesting,
+        handoff,
+        showHandoff,
+        dismissHandoff,
         changePort,
         reloadConfig,
         poolUpgrade,

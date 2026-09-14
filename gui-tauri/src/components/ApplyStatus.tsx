@@ -1,74 +1,55 @@
-import type { ReactNode } from "react";
 import { Check, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { useAppStore } from "@/lib/store";
+import { useHealth, type PrimaryAction, type Tone } from "@/lib/health";
+import { cn } from "@/lib/utils";
+
+const LINE: Record<Tone, string> = {
+  ok: "text-ok",
+  idle: "text-fg3",
+  attention: "text-accent",
+  bad: "text-danger",
+};
+
+/** 现在最该做的那件事。应用会重启 Claude —— 按钮旁边直说，不等点下去才知道。 */
+export function PrimaryActionButton({ primary }: { primary: PrimaryAction | null }) {
+  if (!primary) return null;
+  if (primary.kind === "busy") {
+    return (
+      <Button disabled className="disabled:opacity-80">
+        <Loader2 className="animate-spin" />
+        {primary.label}
+      </Button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-3">
+      {primary.kind === "apply" && <span className="text-[12px] text-fg3">会重启 Claude Desktop</span>}
+      <Button variant={primary.kind === "apply" ? "default" : "ghost"} onClick={primary.run}>
+        {primary.label}
+      </Button>
+    </div>
+  );
+}
 
 /**
- * 页头右侧的应用状态（design-2.2.md §7）。概览页与服务商页用的是同一个，
- * 状态差在哪一页都指向同一个动作。
- *
- * 上面一行说明、下面一个按钮；applying 态也保留那一行，免得页头高度跳一下。
+ * 页头右侧的应用状态（design-2.2.md §7）：上面一句话、下面一个按钮。
+ * 服务商页用；概览页的状态由连通链来说，页头只放按钮。两处读的是同一份 useHealth()。
  */
 export function ApplyStatusArea() {
-  const { applyState, applyError, apply, poolUpgrade, configChanged, pendingCount } = useAppStore();
-
-  let line: ReactNode;
-  let action: ReactNode;
-  switch (applyState) {
-    case "clean":
-      // 没事的时候界面是安静的：强调色一次都不用
-      line = (
-        <span className="flex items-center justify-end gap-1.5 text-ok">
-          <Check size={12} strokeWidth={2.4} />
-          配置已生效
-        </span>
-      );
-      action = (
-        <Button variant="ghost" onClick={apply}>
-          重新应用
-        </Button>
-      );
-      break;
-    case "dirty":
-      line = (
-        <span className="text-accent">
-          {poolUpgrade
-            ? // 升级换了槽位池：老用户得知道为什么突然又要应用一次
-              "新版为你的模型启用了 Claude Desktop 原生推理强度选择器"
-            : !configChanged
-              ? // 这里没改，是 Claude 那边的配置变了（被别的工具或手动改过）
-                `Claude Desktop 里有 ${pendingCount} 处和这里对不上`
-              : pendingCount > 0
-                ? `有 ${pendingCount} 处改动尚未应用`
-                : "配置已修改，尚未应用"}
-        </span>
-      );
-      action = <Button onClick={apply}>应用到 Claude Desktop</Button>;
-      break;
-    case "applying":
-      line = <span className="text-fg3">Claude Desktop 会自动重启</span>;
-      action = (
-        <Button disabled className="disabled:opacity-80">
-          <Loader2 className="animate-spin" />
-          正在重启 Claude…
-        </Button>
-      );
-      break;
-    case "error":
-      line = (
-        <span className="block max-w-[360px] truncate text-danger" title={applyError ?? undefined}>
-          应用失败：{applyError}
-        </span>
-      );
-      action = <Button onClick={apply}>重试</Button>;
-      break;
-  }
-
+  const { line, primary } = useHealth();
   return (
-    <div className="flex flex-col items-end gap-[9px]">
-      <div className="text-[12.5px] leading-[1.5] tracking-[-0.003em]">{line}</div>
-      {action}
+    // 固定高度：有按钮 / 没按钮之间切换时页头不跳，没事时那句话贴着底和副标题对齐
+    <div className="flex min-h-[66px] flex-col items-end justify-end gap-[9px]">
+      <div
+        className={cn("flex max-w-[420px] items-center gap-1.5 text-[12.5px] leading-[1.5] tracking-[-0.003em]", LINE[line.tone])}
+        title={line.text}
+      >
+        {line.tone === "ok" && <Check size={12} strokeWidth={2.4} className="flex-none" />}
+        <span className="truncate">{line.text}</span>
+      </div>
+      {/* 没事做时不放按钮 —— 页头保持安静 */}
+      <PrimaryActionButton primary={primary} />
     </div>
   );
 }

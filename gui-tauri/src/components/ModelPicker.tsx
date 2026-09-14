@@ -13,6 +13,7 @@ type Item = AvailableModel & { custom?: boolean };
  * 清单兜不住的（服务商刚上新）可以直接输入 —— 输入框里敲的名字会作为第一项「使用「…」」。
  */
 export function ModelPicker({
+  label,
   value,
   options,
   caption,
@@ -20,6 +21,8 @@ export function ModelPicker({
   openSignal = 0,
   onPick,
 }: {
+  /** 读屏用的名字（触发器上只有模型名，读出来不知道是什么） */
+  label: string;
   value: string;
   options: AvailableModel[];
   /** 清单上方一行：这份清单从哪来 */
@@ -73,6 +76,7 @@ export function ModelPicker({
         <button
           type="button"
           role="combobox"
+          aria-label={label}
           aria-expanded={open}
           aria-controls={listId}
           className="group flex h-[34px] w-[252px] items-center gap-2 rounded-ctl bg-sunken px-2.5 text-left shadow-[inset_0_0_0_1px_var(--hair2)] transition-shadow outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent),0_0_0_3px_var(--accent-weak)] data-[state=open]:shadow-[inset_0_0_0_1px_var(--accent)]"
@@ -110,6 +114,7 @@ export function ModelPicker({
               }
             }}
             placeholder="搜索，或直接输入模型名"
+            aria-label="搜索模型，或直接输入模型名"
             aria-controls={listId}
             aria-activedescendant={items[active] ? `${listId}-${active}` : undefined}
             spellCheck={false}
@@ -159,7 +164,7 @@ export function ModelPicker({
         </div>
         {showFooter && (
           <p className="mt-1 border-t border-hair px-[9px] pt-2 pb-[5px] text-[11.5px] leading-[1.5] text-fg3">
-            找不到？直接输入模型名 —— 服务商刚上新时清单可能还没同步到
+            找不到？直接输入模型名。服务商刚上新时，清单可能还没同步到
           </p>
         )}
       </PopoverContent>

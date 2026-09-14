@@ -23,7 +23,7 @@ const NAV: { key: Page; label: string }[] = [
  * 整条是拖拽区（deep：子元素也能拖），按钮类元素 Tauri 会自动排除。
  */
 export function TopBar() {
-  const { page, setPage, applyState, reloadConfig, setPickerOpen } = useAppStore();
+  const { page, setPage, applyState, reloadConfig, setPickerOpen, gotoPort } = useAppStore();
   const qc = useQueryClient();
   const statusQ = useQuery({ queryKey: ["proxy-status"], queryFn: proxyStatus });
   const [refreshing, setRefreshing] = useState(false);
@@ -40,6 +40,7 @@ export function TopBar() {
 
   // 应用状态差在任何页面都得看得见（PRODUCT.md 原则二），指向概览页的「应用」
   const pending = applyState === "dirty" || applyState === "error";
+  const proxyDown = statusQ.data?.running === false;
 
   return (
     <header data-tauri-drag-region="deep" className="flex h-16 flex-none items-center px-6">
@@ -75,12 +76,12 @@ export function TopBar() {
               )}
             >
               {label}
-              {key === "overview" && pending && (
+              {key === "overview" && (pending || proxyDown) && (
                 <span
-                  aria-label={applyState === "error" ? "应用失败" : "有改动尚未应用"}
+                  aria-label={proxyDown ? "代理没在运行" : applyState === "error" ? "应用失败" : "有改动还没应用"}
                   className={cn(
                     "absolute top-[5px] right-[5px] size-[5px] rounded-full",
-                    applyState === "error" ? "bg-danger" : "bg-accent",
+                    proxyDown || applyState === "error" ? "bg-danger" : "bg-accent",
                   )}
                 />
               )}
@@ -89,18 +90,24 @@ export function TopBar() {
         </nav>
 
         <div className="flex items-center gap-[18px] justify-self-end">
-          {statusQ.data && (
-            <span className="flex items-center gap-[7px] text-[12.5px] whitespace-nowrap text-fg2">
-              <span
-                className={cn(
-                  "size-1.5 rounded-full",
-                  statusQ.data.running ? "bg-ok" : "bg-accent",
-                )}
-              />
-              {statusQ.data.running ? "代理运行中" : "代理未运行（端口被占）"}
-              <span className="mono text-fg3">127.0.0.1:{statusQ.data.port}</span>
-            </span>
-          )}
+          {statusQ.data &&
+            (statusQ.data.running ? (
+              <span className="flex items-center gap-[7px] text-[12.5px] whitespace-nowrap text-fg2">
+                <span className="size-1.5 rounded-full bg-ok" />
+                代理运行中
+                <span className="mono text-fg3">127.0.0.1:{statusQ.data.port}</span>
+              </span>
+            ) : (
+              // 代理没在跑 = Claude 里每个请求都会失败：用红色，并且点了就去换端口
+              <button
+                onClick={gotoPort}
+                title="端口被别的程序占了，点这里换一个"
+                className="flex h-[30px] items-center gap-[7px] rounded-[7px] px-2 text-[12.5px] whitespace-nowrap text-danger transition-colors outline-none hover:bg-danger/8 focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <span className="size-1.5 rounded-full bg-danger" />
+                代理没在运行 · 换一个端口
+              </button>
+            ))}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

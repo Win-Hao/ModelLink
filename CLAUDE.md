@@ -146,6 +146,12 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
   这一次的真实模型（`identity.rs`），并要求模型别把代号、槽位这些内部细节说给用户听。
 - **「已生效」看的是 Claude 那边真正写着的东西**：概览页逐槽位比对 `applied_state`
   （读回网关配置），不是 ModelLink 自己记得写过什么。配置被别的工具改过时照实显示「未应用」。
+- **「要不要应用」也不看哈希**（2.2）：槽位比对 + 后端 `pending_apply`（网关地址、费率表逐值比）。
+  只改密钥 / 地址 / 默认档不算——代理当场就用上了，别让用户白白重启 Claude。
+  但 `set_port` 会**立刻**改写文件里的网关地址，文件对得上不代表 Claude 用上了（要重启才读），
+  所以端口单独记 `last_applied_port`（不进 canonical hash，否则老用户升级全变脏）。它为空时前端退回按哈希判断。
+- **代理没在跑时，任何地方都不能写「已生效」**：概览页的连通链、页头按钮、设置页排查读的是同一份
+  `src/lib/health.ts`，改判定只改这一处。
 
 ---
 

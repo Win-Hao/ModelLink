@@ -42,6 +42,8 @@ export type Config = {
   port?: number;
   /** 上次「应用」时用的槽位池代号；与当前不符 = 升级后还没重新应用。 */
   last_applied_pool?: string;
+  /** 上次「应用」时代理的端口（后端专管）；没有 = 2.2 之前应用的或从没应用过。 */
+  last_applied_port?: number;
   /** 启动时自动从 models.dev 同步费率（6 小时阈值），默认开。 */
   pricing_auto_sync?: boolean;
   /** 上次成功同步时间（Unix 秒字符串）。 */
@@ -79,6 +81,21 @@ export type AppliedState = {
   provider: string;
   gateway_url: string;
   models: AppliedModel[];
+};
+
+/**
+ * 「要不要应用」里逐槽位比对管不到的部分（后端按 Claude 实际写着的配置判断）。
+ * 只改密钥 / 地址 / 默认档时这几项都不会变 —— 代理当场就用上了，不必重启 Claude。
+ */
+export type PendingApply = {
+  /** 找到并读懂了 Claude 正在用的那份配置 */
+  found: boolean;
+  /** 网关没指向这个代理（没接到 ModelLink，或端口对不上） */
+  gateway: boolean;
+  /** 端口在上次应用之后换过（Claude 要重启才连得上新端口）；null = 不知道 */
+  port_changed: boolean | null;
+  /** 写进 Claude 的费率表过期了 */
+  pricing: boolean;
 };
 
 /** 上游 usage 里的 token 数。 */
@@ -150,6 +167,8 @@ export const syncPricing = (force: boolean) =>
 export const desktopInfo = () => invoke<DesktopInfo>("desktop_info");
 /** 读回 Claude Desktop 眼下实际在用的网关配置（概览页逐槽位「已生效 / 未应用」的依据）。 */
 export const appliedState = () => invoke<AppliedState>("applied_state");
+/** 见 {@link PendingApply}。 */
+export const pendingApply = () => invoke<PendingApply>("pending_apply");
 /** 在访达 / 资源管理器里选中 Claude Desktop 正在用的配置文件（出问题时让用户发过来）。 */
 export const revealClaudeConfig = () => invoke<void>("reveal_claude_config");
 /** 该服务商当前提供的模型（models.dev，按发布日期新→旧）；认不出或未同步时为空。 */

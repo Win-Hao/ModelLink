@@ -11,16 +11,9 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import {
-  appliedState,
-  desktopInfo,
-  guiVersion,
-  proxyStatus,
-  revealClaudeConfig,
-  syncPricing,
-  testProvider,
-} from "@/lib/ipc";
-import { KEY_FEATURE_NAMES, formatSince, providerDisplayName } from "@/lib/presets";
+import { desktopInfo, guiVersion, proxyStatus, revealClaudeConfig, syncPricing } from "@/lib/ipc";
+import { useHealth } from "@/lib/health";
+import { KEY_FEATURE_NAMES, formatSince } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useUpdaterCtx } from "@/lib/updaterContext";
@@ -53,161 +46,76 @@ function Row({ title, sub, children }: { title: string; sub?: ReactNode; childre
   );
 }
 
-type Check = { key: string; state: "ok" | "bad" | "pending"; text: string; fix?: () => void };
-
 /**
  * 一键排查（design-2.2.md §6.4）：用户在 Claude 里报错时第一反应就是来设置页翻。
- * 四项检查常驻在页面上；本地能判断的实时算，服务商连通要真发请求，点「检查」才测。
+ * 和概览页的连通链读同一份 useHealth() —— 两处永远说同一句话。
+ * 本地能判断的实时算，服务商连通要真发请求，点「开始检查」才测。
  */
-function Diagnostics({ onFixPort }: { onFixPort: () => void }) {
-  const { draft, applyState, verificationFor, recordVerification, setPage, gotoProvider } =
-    useAppStore();
+function Diagnostics() {
+  const { testProviders, setPage } = useAppStore();
+  const { links } = useHealth();
   const qc = useQueryClient();
-  const statusQ = useQuery({ queryKey: ["proxy-status"], queryFn: proxyStatus });
-  const appliedQ = useQuery({ queryKey: ["applied-state"], queryFn: appliedState });
   const [running, setRunning] = useState(false);
   const [ran, setRan] = useState(false);
-
-  const providers = draft?.providers ?? [];
-  const complete = (i: number) => {
-    const p = providers[i];
-    return !!p.target_url && !!p.api_key && p.models.some((m) => m.name);
-  };
 
   const run = async () => {
     setRunning(true);
     await Promise.all([
       qc.invalidateQueries({ queryKey: ["proxy-status"] }),
       qc.invalidateQueries({ queryKey: ["applied-state"] }),
-      ...providers.map(async (p, i) => {
-        if (!complete(i)) return; // 没填全的不测，下面单独点名
-        const model = p.models.find((m) => m.name)!.name;
-        try {
-          const r = await testProvider(p.target_url, p.api_key, model);
-          recordVerification(p, { ok: r.ok, at: Date.now(), message: r.message });
-        } catch (e) {
-          recordVerification(p, { ok: false, at: Date.now(), message: String(e) });
-        }
-      }),
+      qc.invalidateQueries({ queryKey: ["pending-apply"] }),
+      testProviders(),
     ]);
     setRunning(false);
     setRan(true);
   };
 
-  const checks: Check[] = [];
-  const toOverview = () => setPage("overview");
-
-  const st = statusQ.data;
-  if (st) {
-    checks.push(
-      st.running
-        ? { key: "port", state: "ok", text: `端口 ${st.port} 未被占用` }
-        : { key: "port", state: "bad", text: `端口 ${st.port} 被占用，代理没能启动`, fix: onFixPort },
-    );
-  }
-
-  const a = appliedQ.data;
-  if (a && st) {
-    if (!a.found) {
-      checks.push({ key: "claude", state: "bad", text: "没找到 Claude Desktop 的配置" });
-    } else if (a.provider !== "gateway" || a.gateway_url !== `http://127.0.0.1:${st.port}`) {
-      checks.push({ key: "claude", state: "bad", text: "Claude Desktop 没接到 ModelLink", fix: toOverview });
-    } else if (a.models.length === 0) {
-      checks.push({ key: "claude", state: "bad", text: "Claude Desktop 里还没有模型", fix: toOverview });
-    } else {
-      checks.push({ key: "claude", state: "ok", text: "Claude Desktop 配置已写入" });
-    }
-  }
-
-  if (providers.length === 0) {
-    checks.push({ key: "keys", state: "bad", text: "还没有服务商", fix: () => setPage("providers") });
-  } else if (running) {
-    checks.push({ key: "keys", state: "pending", text: "正在测试服务商连接…" });
-  } else {
-    const incomplete = providers.findIndex((_, i) => !complete(i));
-    const results = providers.map((p) => verificationFor(p));
-    const failed = results.findIndex((v) => v && !v.ok);
-    const failedCount = results.filter((v) => v && !v.ok).length;
-    const untested = results.filter((v) => !v).length;
-    const nameOf = (i: number) => providerDisplayName(providers[i].target_url, i);
-    if (incomplete >= 0) {
-      checks.push({
-        key: "keys",
-        state: "bad",
-        text: `「${nameOf(incomplete)}」还没填完`,
-        fix: () => gotoProvider(incomplete),
-      });
-    } else if (failed >= 0) {
-      checks.push({
-        key: "keys",
-        state: "bad",
-        text: failedCount === 1 ? `「${nameOf(failed)}」连不上` : `${failedCount} 家服务商连不上`,
-        fix: () => gotoProvider(failed),
-      });
-    } else if (untested > 0) {
-      checks.push({
-        key: "keys",
-        state: "pending",
-        text: `${untested} 家服务商还没测试过连接`,
-        fix: () => void run(),
-      });
-    } else {
-      checks.push({
-        key: "keys",
-        state: "ok",
-        text: providers.length === 1 ? "服务商密钥已连通" : `${providers.length} 家服务商密钥全部连通`,
-      });
-    }
-  }
-
-  // 最常见的售后原因：改了配置忘了点「应用」
-  checks.push(
-    applyState === "clean"
-      ? { key: "apply", state: "ok", text: "配置已生效" }
-      : applyState === "applying"
-        ? { key: "apply", state: "pending", text: "正在应用…" }
-        : applyState === "error"
-          ? { key: "apply", state: "bad", text: "上次应用没成功", fix: toOverview }
-          : { key: "apply", state: "bad", text: "配置已修改但尚未应用", fix: toOverview },
-  );
-
   return (
     <div className="flex items-center gap-3.5 border-b border-hair px-[22px] py-[13px]">
       <div className="min-w-0 flex-1">
         <div className="text-body">一键排查</div>
-        <div className="mt-[3px] text-[11.5px] text-fg3">
-          Claude 里连不上、模型不见了、突然变贵了 —— 先点这里，三秒出结论
+        <div className="mt-[3px] text-[12px] text-fg3">
+          Claude 里连不上、模型不见了、突然变贵了？先点这里，三秒出结论
         </div>
         <div className="mt-[9px] flex flex-wrap gap-[7px]">
-          {checks.map((c) => {
+          {links.map((l) => {
+            // Claude 那一环的修法在概览页（应用按钮在那儿）
+            const fix =
+              l.fix ??
+              (l.key === "claude" && (l.tone === "attention" || l.tone === "bad")
+                ? { label: "去概览页", run: () => setPage("overview") }
+                : undefined);
             const cls = cn(
-              "flex items-center gap-1.5 rounded-[7px] px-[9px] py-1 text-[11.5px] inset-ring",
-              c.state === "ok" && "text-fg2 inset-ring-hair2",
-              c.state === "pending" && "text-fg3 inset-ring-hair2",
-              c.state === "bad" && "text-danger inset-ring-danger/30",
+              "flex items-center gap-1.5 rounded-[7px] px-[9px] py-1 text-[12px] inset-ring",
+              l.tone === "ok" && "text-fg2 inset-ring-hair2",
+              l.tone === "idle" && "text-fg3 inset-ring-hair2",
+              l.tone === "attention" && "text-accent inset-ring-accent/35",
+              l.tone === "bad" && "text-danger inset-ring-danger/30",
             );
-            const dot = (
-              <i
-                className={cn(
-                  "size-[5px] flex-none rounded-full",
-                  c.state === "ok" ? "bg-ok" : c.state === "bad" ? "bg-danger" : "bg-hair2",
-                )}
-              />
+            const body = (
+              <>
+                <i
+                  className={cn(
+                    "size-[5px] flex-none rounded-full",
+                    l.tone === "ok" ? "bg-ok" : l.tone === "bad" ? "bg-danger" : l.tone === "attention" ? "bg-accent" : "bg-fg3/45",
+                  )}
+                />
+                {l.title}：{l.text}
+                {l.mono && <span className="mono text-fg3">{l.mono}</span>}
+              </>
             );
-            return c.fix ? (
+            return fix ? (
               <button
-                key={c.key}
-                onClick={c.fix}
-                className={cn(cls, "transition-colors", c.state === "bad" ? "hover:bg-danger/5" : "hover:bg-hair")}
-                title={c.state === "bad" ? "去处理" : undefined}
+                key={l.key}
+                onClick={fix.run}
+                title={[l.hint, fix.label].filter(Boolean).join("\n")}
+                className={cn(cls, "transition-colors", l.tone === "bad" ? "hover:bg-danger/5" : "hover:bg-hair")}
               >
-                {dot}
-                {c.text} →
+                {body} →
               </button>
             ) : (
-              <span key={c.key} className={cls}>
-                {dot}
-                {c.text}
+              <span key={l.key} className={cls} title={l.hint}>
+                {body}
               </span>
             );
           })}
@@ -224,7 +132,7 @@ function Diagnostics({ onFixPort }: { onFixPort: () => void }) {
 /** 设置页（design-2.2.md §6.4）：常用 / 高级 / 出问题时。 */
 export function SettingsPage() {
   const { pref, setPref } = useTheme();
-  const { changePort, draft, updateDraft, reloadConfig } = useAppStore();
+  const { changePort, draft, updateDraft, reloadConfig, focusPortNonce } = useAppStore();
   const updater = useUpdaterCtx();
   const qc = useQueryClient();
 
@@ -240,6 +148,17 @@ export function SettingsPage() {
   useEffect(() => {
     if (statusQ.data) setPortText(String(statusQ.data.port));
   }, [statusQ.data]);
+
+  // 「换一个端口」从别的页跳过来：滚到端口框并聚焦
+  const handledPortNonce = useRef(0);
+  useEffect(() => {
+    if (focusPortNonce > handledPortNonce.current && portText) {
+      handledPortNonce.current = focusPortNonce;
+      portRef.current?.scrollIntoView({ block: "center" });
+      // 等端口值填进输入框之后再全选，否则填值那次重渲染会把选区冲掉，用户敲的数字就接在旧端口后面了
+      portRef.current?.select();
+    }
+  }, [focusPortNonce, portText]);
 
   const submitPort = async () => {
     const cur = statusQ.data?.port;
@@ -305,6 +224,7 @@ export function SettingsPage() {
       ? `当前 ${version} · 已是最新版本`
       : `当前 ${version}`;
 
+
   const unavailable = (desktopQ.data?.unavailable ?? []).map((k) => KEY_FEATURE_NAMES[k] ?? k);
   const syncedSince = formatSince(draft?.pricing_synced_at);
 
@@ -346,7 +266,18 @@ export function SettingsPage() {
         </Group>
 
         <Group title="高级">
-          <Row title="代理端口" sub="修改后立即生效，需要重新应用到 Claude Desktop">
+          <Row
+            title="代理端口"
+            sub={
+              statusQ.data && !statusQ.data.running ? (
+                <span className="text-danger">
+                  端口 {statusQ.data.port} 被别的程序占了。换一个 1024–65535 之间的数字，比如 5679，再应用一次
+                </span>
+              ) : (
+                "改完马上生效，再应用一次 Claude 就会连到新端口"
+              )
+            }
+          >
             {switching && <Loader2 size={12} className="animate-spin text-fg3" />}
             <Input
               ref={portRef}
@@ -389,12 +320,7 @@ export function SettingsPage() {
         </Group>
 
         <Group title="出问题时">
-          <Diagnostics
-            onFixPort={() => {
-              portRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-              portRef.current?.focus();
-            }}
-          />
+          <Diagnostics />
           <Row
             title="Claude Desktop"
             sub={

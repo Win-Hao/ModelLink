@@ -171,6 +171,38 @@ export function presetHost(p: Preset): string {
   }
 }
 
+/**
+ * 各家「创建 / 查看 API 密钥」的官方页面，服务商页密钥框旁边的链接用。
+ *
+ * 只收官方文档里写明的地址（2026-09-14 逐家核对；控制台都要登录，证据是文档里的链接原文）。
+ * 同一个 API 地址按量付费和订阅套餐共用、走哪条线由密钥决定的（MiniMax、智谱），
+ * 两个入口都给并写明是哪条线 —— 只给一个会把另一条线的用户带去错的地方，而两边的密钥不通用。
+ */
+export type KeyPage = { url: string; plan?: string };
+
+const KEY_PAGES: Record<string, KeyPage[]> = {
+  deepseek: [{ url: "https://platform.deepseek.com/api_keys" }],
+  "kimi-code": [{ url: "https://www.kimi.com/code/console" }],
+  kimi: [{ url: "https://platform.kimi.com/console/api-keys" }],
+  minimax: [
+    { plan: "按量付费", url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
+    { plan: "Token Plan", url: "https://platform.minimaxi.com/user-center/payment/token-plan" },
+  ],
+  "qwen-coding": [{ url: "https://bailian.console.aliyun.com/cn-beijing/subscription/coding-plan" }],
+  // 团队版成员的密钥由管理员生成，没有自助页面；个人版是这个
+  "qwen-token": [{ url: "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal" }],
+  glm: [
+    { plan: "按量付费", url: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys" },
+    { plan: "Coding Plan", url: "https://bigmodel.cn/coding-plan/personal/overview" },
+  ],
+  mimo: [{ url: "https://platform.xiaomimimo.com/#/console/api-keys" }],
+};
+
+export function keyPagesFor(url: string): KeyPage[] {
+  const p = matchPreset(url);
+  return (p && KEY_PAGES[p.id]) || [];
+}
+
 export function matchPreset(url: string): Preset | null {
   if (!url) return null;
   const u = url.toLowerCase();

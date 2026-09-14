@@ -110,6 +110,13 @@ pub struct Config {
     /// 前端据此把「升级导致的 dirty」和「用户改了配置」区分开，给出对应的提示语。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_applied_pool: String,
+    /// 2.2 新增：上次「应用」时代理用的端口。后端专管，不进 canonical hash。
+    ///
+    /// 端口热切换（`set_port`）会立刻改写 Claude 配置里的网关地址，但 Claude 要重启才读新地址 ——
+    /// 光比对那份配置文件看不出「写了但 Claude 还没用上」，所以要记下应用那一刻的端口。
+    /// None = 2.2 之前应用的（或从没应用过），前端这时退回按配置哈希判断要不要应用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied_port: Option<u16>,
     /// 2.1-B 新增：启动时自动从 models.dev 同步费率（6 小时阈值）。默认开。
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub pricing_auto_sync: bool,
@@ -138,6 +145,7 @@ impl Default for Config {
             last_applied_at: String::new(),
             port: DEFAULT_PORT,
             last_applied_pool: String::new(),
+            last_applied_port: None,
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
             models_dev_models: std::collections::HashMap::new(),
@@ -660,6 +668,18 @@ mod tests {
         a.last_applied_hash = "".into();
         b.last_applied_hash = "something-else".into();
         assert_eq!(canonical_hash(&a), canonical_hash(&b));
+    }
+
+    /// 2.2 加的 last_applied_port 不能进哈希 —— 进了，老用户升级后 last_applied_hash 就全对不上，
+    /// 每个人都会莫名其妙看到一次「尚未应用」。
+    #[test]
+    fn canonical_hash_ignores_last_applied_port_so_upgrades_stay_clean() {
+        let a = sample_config();
+        let mut b = sample_config();
+        b.last_applied_port = Some(5679);
+        assert_eq!(canonical_hash(&a), canonical_hash(&b));
+        // 没应用过时不写进 config.json，老用户文件格式不变
+        assert!(!serde_json::to_string(&a).unwrap().contains("last_applied_port"));
     }
 
     #[test]

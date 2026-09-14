@@ -34,6 +34,7 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         config.last_applied_hash = cur.last_applied_hash.clone();
         config.last_applied_at = cur.last_applied_at.clone();
         config.last_applied_pool = cur.last_applied_pool.clone();
+        config.last_applied_port = cur.last_applied_port;
         config.port = cur.port;
         config.pricing_synced_at = cur.pricing_synced_at.clone();
         config.models_dev_models = cur.models_dev_models.clone();
@@ -151,6 +152,7 @@ pub async fn apply_to_claude(state: State<'_, Arc<ProxyState>>) -> Result<String
     // design.md §8：apply 成功后持久化 last_applied_hash（写盘失败不回滚 apply，仅打日志）
     config.last_applied_hash = canonical_hash(&config);
     config.last_applied_pool = crate::config::SLOT_POOL_VERSION.to_string();
+    config.last_applied_port = Some(config.port);
     config.last_applied_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
@@ -186,6 +188,15 @@ pub fn desktop_info() -> DesktopInfo {
 #[tauri::command]
 pub fn applied_state() -> gateway::AppliedState {
     gateway::read_applied_state()
+}
+
+/// 「要不要应用」里逐槽位比对管不到的部分：网关地址、端口换没换过、费率表。
+/// 只改密钥 / 地址 / 默认档这类代理当场就用上的东西，这里和槽位比对都不会报 ——
+/// 不必为它们重启 Claude。
+#[tauri::command]
+pub fn pending_apply(state: State<'_, Arc<ProxyState>>) -> gateway::PendingApply {
+    let config = state.config.read().unwrap_or_else(|e| e.into_inner()).clone();
+    gateway::read_pending_apply(&config)
 }
 
 /// 设置页「打开配置目录」：在访达 / 资源管理器里选中 Claude Desktop 正在用的那份配置文件。

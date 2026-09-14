@@ -645,11 +645,63 @@ pub fn applied_config_file() -> Option<PathBuf> {
 
 /// 读回 Claude Desktop 正在用的网关配置（只读）。
 pub fn read_applied_state() -> AppliedState {
+    read_applied_json().map(|json| parse_applied_state(&json)).unwrap_or_default()
+}
+
+fn read_applied_json() -> Option<serde_json::Value> {
     applied_config_file()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|json| parse_applied_state(&json))
-        .unwrap_or_default()
+}
+
+/// 「要不要应用」里逐槽位比对（前端比 [`AppliedState::models`]）管不到的部分。
+///
+/// 判断依据是 Claude 那边真正写着的东西，不是配置哈希：只改了密钥 / 地址 / 默认档时
+/// 代理当场就用上了，这几项都不会变 —— 不该为此让用户重启一次 Claude。
+#[derive(serde::Serialize, Default, Debug, PartialEq)]
+pub struct PendingApply {
+    /// 找到并读懂了 Claude 正在用的那份配置
+    pub found: bool,
+    /// 网关没指向这个代理（没接到 ModelLink，或端口对不上）
+    pub gateway: bool,
+    /// 端口在上次应用之后换过。`set_port` 会立刻改写配置文件里的地址，
+    /// 所以文件对得上也不代表 Claude 用上了 —— 它要重启才读新地址。
+    /// `None` = 不知道（2.2 之前应用的，或从没应用过）
+    pub port_changed: Option<bool>,
+    /// 写进 Claude 的费率表和按现在的配置该写的不一样（同步来了新价、换了模型）
+    pub pricing: bool,
+}
+
+fn pending_against(config: &Config, file: &serde_json::Value, gate: &VersionGate) -> PendingApply {
+    let url = format!("http://127.0.0.1:{}", config.port);
+    let gateway = file.get("inferenceProvider").and_then(|v| v.as_str()) != Some("gateway")
+        || file.get("inferenceGatewayBaseUrl").and_then(|v| v.as_str()) != Some(url.as_str());
+    // 用写入时的同一个函数生成「该写成什么样」，再和文件逐值比 —— 不在这里另写一套规则
+    let pricing = gate.allows("inferenceModelPricing") && {
+        let mut want = serde_json::json!({});
+        write_pricing_keys(&mut want, &flatten_config(config));
+        want.get("inferenceModelPricingEnabled") != file.get("inferenceModelPricingEnabled")
+            || want.get("inferenceModelPricing") != file.get("inferenceModelPricing")
+    };
+    PendingApply {
+        found: true,
+        gateway,
+        port_changed: config.last_applied_port.map(|p| p != config.port),
+        pricing,
+    }
+}
+
+/// 见 [`PendingApply`]。没找到配置文件时 `found=false`，其余按「还没接上」处理。
+pub fn read_pending_apply(config: &Config) -> PendingApply {
+    match read_applied_json() {
+        Some(json) => pending_against(config, &json, &VersionGate::detect()),
+        None => PendingApply {
+            found: false,
+            gateway: true,
+            port_changed: config.last_applied_port.map(|p| p != config.port),
+            pricing: false,
+        },
+    }
 }
 
 struct ScopeGuard<F: FnOnce()>(Option<F>);
@@ -1162,6 +1214,116 @@ mod tests {
                 ],
             }
         );
+    }
+
+    /// 模拟一次「应用」写进文件的内容（与 apply_to_claude_desktop 同一组函数）。
+    fn written_by_apply(cfg: &Config, gate: &VersionGate) -> serde_json::Value {
+        let flat = flatten_config(cfg);
+        let mut file = serde_json::json!({ "someUserSetting": 1 });
+        write_gateway_keys(&mut file, cfg.port, gate);
+        file["inferenceModels"] = serde_json::json!(inference_models_entries(&flat));
+        if gate.allows("inferenceModelPricing") {
+            write_pricing_keys(&mut file, &flat);
+        }
+        file
+    }
+
+    fn applied(cfg: Config) -> Config {
+        Config { last_applied_port: Some(cfg.port), ..cfg }
+    }
+
+    /// 刚应用完：什么都不欠。
+    #[test]
+    fn nothing_is_pending_right_after_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0), priced("k3", 0.6, 2.5)]));
+        let file = written_by_apply(&cfg, &gate);
+        assert_eq!(
+            pending_against(&cfg, &file, &gate),
+            PendingApply { found: true, gateway: false, port_changed: Some(false), pricing: false }
+        );
+    }
+
+    /// 只改密钥 / 地址 / 默认档：代理当场用上，不该要求重启 Claude（哈希会变，但这里不能报）。
+    #[test]
+    fn key_url_and_effort_edits_do_not_need_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        let file = written_by_apply(&cfg, &gate);
+
+        let mut edited = cfg.clone();
+        edited.providers[0].api_key = "a-new-key".into();
+        edited.providers[0].target_url = "https://b.example.com".into();
+        edited.providers[0].thinking_effort = "max".into();
+        assert_ne!(crate::config::canonical_hash(&cfg), crate::config::canonical_hash(&edited));
+        assert_eq!(
+            pending_against(&edited, &file, &gate),
+            PendingApply { found: true, gateway: false, port_changed: Some(false), pricing: false }
+        );
+    }
+
+    /// 同步来了新价：Claude 里的费用还按旧价算，要应用。
+    #[test]
+    fn new_prices_need_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        let file = written_by_apply(&cfg, &gate);
+        let repriced = applied(cfg_with(vec![priced("Kimi-k2.6", 3.0, 16.0)]));
+        assert!(pending_against(&repriced, &file, &gate).pricing);
+    }
+
+    /// 从「有模型没价（费用关着）」变成「全都有价」也要应用 —— 开关本身变了。
+    #[test]
+    fn pricing_switch_flip_needs_apply() {
+        let gate = VersionGate::with_version(None);
+        let unpriced = applied(cfg_with(vec![ModelEntry { name: "k3".into(), ..Default::default() }]));
+        let file = written_by_apply(&unpriced, &gate);
+        let priced_now = applied(cfg_with(vec![priced("k3", 0.6, 2.5)]));
+        assert!(pending_against(&priced_now, &file, &gate).pricing);
+    }
+
+    /// 端口热切换已经把新地址写进文件，但 Claude 没重启就还连着旧端口 —— 文件对得上也要应用。
+    #[test]
+    fn port_switch_needs_apply_even_though_the_file_already_has_the_new_url() {
+        let gate = VersionGate::with_version(None);
+        let mut cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        cfg.port = 5679; // set_port 之后：config.port 变了，last_applied_port 还是 5678
+        let mut file = written_by_apply(&cfg, &gate);
+        write_gateway_keys(&mut file, 5679, &gate); // set_port 里的 ensure_claude_desktop_gateway
+        let p = pending_against(&cfg, &file, &gate);
+        assert!(!p.gateway);
+        assert_eq!(p.port_changed, Some(true));
+    }
+
+    /// Claude 配置被别的工具改走了：网关不指向这里。
+    #[test]
+    fn gateway_pointing_elsewhere_needs_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        let mut file = written_by_apply(&cfg, &gate);
+        file["inferenceGatewayBaseUrl"] = serde_json::json!("http://127.0.0.1:9999");
+        assert!(pending_against(&cfg, &file, &gate).gateway);
+        file["inferenceGatewayBaseUrl"] = serde_json::json!("http://127.0.0.1:5678");
+        file["inferenceProvider"] = serde_json::json!("anthropic");
+        assert!(pending_against(&cfg, &file, &gate).gateway);
+    }
+
+    /// 2.2 之前应用的：不知道当时的端口，交给前端退回按哈希判断。
+    #[test]
+    fn port_change_is_unknown_before_the_first_22_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]);
+        let file = written_by_apply(&cfg, &gate);
+        assert_eq!(pending_against(&cfg, &file, &gate).port_changed, None);
+    }
+
+    /// 老版 Claude 不认费率键：ModelLink 也不写，自然不能因为费率要求应用。
+    #[test]
+    fn old_desktop_without_pricing_never_reports_pricing() {
+        let old = VersionGate::with_version(Some("1.30000.0"));
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        let file = written_by_apply(&cfg, &old);
+        assert!(!pending_against(&cfg, &file, &old).pricing);
     }
 
     /// 老版本写的条目没有 labelOverride / supports1m；坏条目（没有 name）直接跳过，不连累整份。

@@ -212,6 +212,7 @@ pub fn run() {
             commands::available_models,
             commands::desktop_info,
             commands::applied_state,
+            commands::pending_apply,
             commands::reveal_claude_config,
             commands::force_quit_and_relaunch
         ])

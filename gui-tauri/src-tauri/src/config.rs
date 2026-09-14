@@ -123,6 +123,11 @@ pub struct Config {
     /// （预设是 Kimi-k2.6 / 2026-04-21，而 Kimi Code 现在提供的是 k3 / 2026-07-16）。
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub models_dev_models: std::collections::HashMap<String, Vec<String>>,
+    /// 2.2 新增：models.dev 服务商 ID → 模型 ID → 上下文上限（token）。后端专管，随费率一起同步。
+    /// 模型选择器据此标注上下文；保存时用它补齐新挑的模型的 `context_limit`，
+    /// 1M 开关不必等下一次同步才知道装不装得下。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub models_dev_context: std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
 }
 
 impl Default for Config {
@@ -136,6 +141,7 @@ impl Default for Config {
             pricing_auto_sync: true,
             pricing_synced_at: String::new(),
             models_dev_models: std::collections::HashMap::new(),
+            models_dev_context: std::collections::HashMap::new(),
         }
     }
 }

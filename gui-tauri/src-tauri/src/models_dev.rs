@@ -38,6 +38,9 @@ pub type Catalog = HashMap<String, HashMap<String, ModelInfo>>;
 /// models.dev 服务商 ID → 它当前提供的模型 ID 列表（按发布日期新→旧）。
 pub type ModelIndex = HashMap<String, Vec<String>>;
 
+/// models.dev 服务商 ID → 模型 ID → 上下文上限（token）。只收写了 `limit.context` 的条目。
+pub type ContextIndex = HashMap<String, HashMap<String, u64>>;
+
 /// 从 api.json 抽出每家服务商的模型 ID 列表，供模型名输入框做补全。
 ///
 /// 与 `parse_catalog` 分开：那个只收有 `cost` 的条目（费率表用），
@@ -75,6 +78,65 @@ pub fn parse_model_ids(body: &[u8]) -> ModelIndex {
         }
     }
     out
+}
+
+/// 从 api.json 抽出每个模型的上下文上限，供模型选择器标注、1M 开关判断。
+///
+/// 费率表里也有上下文，但只收了有 `cost` 的条目；选择器列出的是这家的全部模型，
+/// 没标价的也要知道它装不装得下 1M。
+pub fn parse_model_contexts(body: &[u8]) -> ContextIndex {
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return ContextIndex::new();
+    };
+    let Some(obj) = root.as_object() else {
+        return ContextIndex::new();
+    };
+    let mut out = ContextIndex::new();
+    for (provider_id, provider) in obj {
+        let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        let known: HashMap<String, u64> = models
+            .iter()
+            .filter_map(|(id, m)| {
+                let ctx = m.get("limit")?.get("context")?.as_u64()?;
+                Some((id.clone(), ctx))
+            })
+            .collect();
+        if !known.is_empty() {
+            out.insert(provider_id.clone(), known);
+        }
+    }
+    out
+}
+
+/// 用模型清单里的上下文上限，补齐还不知道上限的模型（刚加的、改了名的、没标价的），
+/// 返回补上的条数。
+///
+/// 只补空的，已知的不动（那是费率同步写的，两者同源）。只在这家服务商名下查；
+/// 认不出的服务商（自定义 URL）不猜。
+pub fn fill_known_context(config: &mut Config) -> usize {
+    let contexts = &config.models_dev_context;
+    let mut filled = 0;
+    for p in &mut config.providers {
+        let Some(known) = provider_id_for_url(&p.target_url).and_then(|pid| contexts.get(pid)) else {
+            continue;
+        };
+        for m in &mut p.models {
+            if m.context_limit.is_some() || m.name.is_empty() {
+                continue;
+            }
+            let name = m.name.strip_suffix("[1m]").unwrap_or(&m.name);
+            let found = known
+                .get(name)
+                .or_else(|| known.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v));
+            if let Some(ctx) = found {
+                m.context_limit = Some(*ctx);
+                filled += 1;
+            }
+        }
+    }
+    filled
 }
 
 /// 本地服务商 URL → models.dev 服务商 ID。
@@ -118,7 +180,7 @@ pub fn known_provider_ids() -> Vec<&'static str> {
 
 /// 只留我们认得的那几家 —— api.json 有 213 家，全存进 config.json 会让它从
 /// 600 字节涨到 238 KB（实测），而那个文件每次编辑都要重写。
-pub fn keep_known_providers(index: ModelIndex) -> ModelIndex {
+pub fn keep_known_providers<V>(index: HashMap<String, V>) -> HashMap<String, V> {
     let known = known_provider_ids();
     index.into_iter().filter(|(k, _)| known.contains(&k.as_str())).collect()
 }
@@ -270,7 +332,9 @@ pub fn apply_catalog(config: &mut Config, catalog: &Catalog) -> usize {
 
 /// 拉取 + 解析。**不碰配置** —— 网络往返期间用户可能正在改配置，
 /// 落盘一律等回到主流程、重新取写锁之后再做（见 commands::sync_pricing）。
-pub async fn fetch_catalog(client: &reqwest::Client) -> Result<(Catalog, ModelIndex), String> {
+pub async fn fetch_catalog(
+    client: &reqwest::Client,
+) -> Result<(Catalog, ModelIndex, ContextIndex), String> {
     fetch_catalog_from(client, MODELS_DEV_API_URL).await
 }
 
@@ -278,7 +342,7 @@ pub async fn fetch_catalog(client: &reqwest::Client) -> Result<(Catalog, ModelIn
 pub async fn fetch_catalog_from(
     client: &reqwest::Client,
     url: &str,
-) -> Result<(Catalog, ModelIndex), String> {
+) -> Result<(Catalog, ModelIndex, ContextIndex), String> {
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(20))
@@ -289,7 +353,11 @@ pub async fn fetch_catalog_from(
         return Err(format!("models.dev 返回 HTTP {}", resp.status().as_u16()));
     }
     let body = resp.bytes().await.map_err(|e| format!("读取 models.dev 响应失败: {e}"))?;
-    Ok((parse_catalog(&body)?, keep_known_providers(parse_model_ids(&body))))
+    Ok((
+        parse_catalog(&body)?,
+        keep_known_providers(parse_model_ids(&body)),
+        keep_known_providers(parse_model_contexts(&body)),
+    ))
 }
 
 /// 把「后端专管」的同步费率从旧配置搬到前端回传的新配置上（按 服务商 URL + 模型名 匹配，
@@ -442,6 +510,57 @@ mod tests {
     }
 
     #[test]
+    fn model_contexts_cover_entries_without_a_cost_block() {
+        // 选择器要标出每个模型的上下文，没标价的也算；没写 limit 的就是不知道
+        let ctx = parse_model_contexts(SAMPLE);
+        assert_eq!(ctx["moonshotai-cn"]["kimi-k3"], 1_048_576);
+        assert_eq!(ctx["no-cost"]["x"], 1);
+        assert!(!ctx.contains_key("deepseek"), "没写 limit 的服务商不该出现");
+        assert!(parse_model_contexts(b"not json").is_empty());
+    }
+
+    fn cfg_for(url: &str, models: Vec<ModelEntry>) -> Config {
+        Config {
+            providers: vec![Provider {
+                target_url: url.into(),
+                api_key: "k".into(),
+                models,
+                thinking_effort: String::new(),
+            }],
+            models_dev_context: keep_known_providers(parse_model_contexts(SAMPLE)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fill_known_context_only_fills_the_blanks() {
+        // 刚从选择器里挑的模型：还没同步过，1M 开关却要马上知道它装不装得下
+        let mut cfg = cfg_for(
+            "https://api.moonshot.cn/anthropic",
+            vec![
+                ModelEntry { name: "KIMI-K3".into(), ..Default::default() },
+                ModelEntry { name: "kimi-k2.6[1m]".into(), ..Default::default() },
+                // 已知的不动
+                ModelEntry { name: "kimi-k3".into(), context_limit: Some(7), ..Default::default() },
+                ModelEntry { name: "查无此模型".into(), ..Default::default() },
+            ],
+        );
+        assert_eq!(fill_known_context(&mut cfg), 2);
+        let got: Vec<_> = cfg.providers[0].models.iter().map(|m| m.context_limit).collect();
+        assert_eq!(got, vec![Some(1_048_576), Some(262_144), Some(7), None]);
+    }
+
+    #[test]
+    fn fill_known_context_does_not_guess_for_custom_urls() {
+        let mut cfg = cfg_for(
+            "https://my-relay.example.com",
+            vec![ModelEntry { name: "kimi-k3".into(), ..Default::default() }],
+        );
+        assert_eq!(fill_known_context(&mut cfg), 0);
+        assert_eq!(cfg.providers[0].models[0].context_limit, None);
+    }
+
+    #[test]
     fn catalog_carries_the_context_limit() {
         // 判断一个模型到底有没有 1M 上下文，靠的就是这个字段
         let c = catalog();
@@ -535,6 +654,7 @@ mod tests {
         assert_eq!(provider_id_for_url("https://open.bigmodel.cn/api/anthropic"), Some("zhipuai"));
         assert_eq!(provider_id_for_url("https://api.example.com/v1"), None);
     }
+
 
     #[test]
     fn lookup_stays_inside_the_matched_provider() {

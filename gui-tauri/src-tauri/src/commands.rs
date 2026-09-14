@@ -37,9 +37,12 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         config.port = cur.port;
         config.pricing_synced_at = cur.pricing_synced_at.clone();
         config.models_dev_models = cur.models_dev_models.clone();
+        config.models_dev_context = cur.models_dev_context.clone();
         // 后台同步可能刚写完，而前端手上这份草稿是同步前的 —— 别让它抹掉同步结果
         models_dev::preserve_synced_pricing(&mut config, &cur);
     }
+    // 刚挑的模型：同步来的上下文上限先补上，1M 开关马上就能判断
+    models_dev::fill_known_context(&mut config);
     save_config_file(&config)?;
     *state.config.write().unwrap_or_else(|e| e.into_inner()) = config.clone();
     eprintln!("[config] saved");
@@ -179,6 +182,23 @@ pub fn desktop_info() -> DesktopInfo {
     }
 }
 
+/// Claude Desktop 实际在用的网关配置（只读）：概览页逐槽位的「已生效 / 未应用」据此判断。
+#[tauri::command]
+pub fn applied_state() -> gateway::AppliedState {
+    gateway::read_applied_state()
+}
+
+/// 设置页「打开配置目录」：在访达 / 资源管理器里选中 Claude Desktop 正在用的那份配置文件。
+/// 出问题时让用户把它发过来 —— 这个文件里没有 API 密钥（网关密钥固定写的是 "proxy"）。
+#[tauri::command]
+pub fn reveal_claude_config() -> Result<(), String> {
+    let target = gateway::applied_config_file()
+        .filter(|p| p.exists())
+        .or_else(|| gateway::claude_3p_dir().filter(|d| d.exists()))
+        .ok_or("没找到 Claude Desktop 的配置目录 —— Claude Desktop 可能还没装，或者还没打开过")?;
+    tauri_plugin_opener::reveal_item_in_dir(&target).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize)]
 pub struct PricingSyncResult {
     pub ok: bool,
@@ -214,7 +234,7 @@ pub async fn sync_pricing(
     }
 
     // 网络往返期间不持锁 —— 拿到 catalog 再回来落盘
-    let (catalog, model_index) = match models_dev::fetch_catalog(&state.client).await {
+    let (catalog, model_index, context_index) = match models_dev::fetch_catalog(&state.client).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[pricing] 同步失败: {}", e);
@@ -230,8 +250,10 @@ pub async fn sync_pricing(
 
     let (changed, config) = {
         let mut cur = state.config.write().unwrap_or_else(|e| e.into_inner());
-        let changed = models_dev::apply_catalog(&mut cur, &catalog);
+        let mut changed = models_dev::apply_catalog(&mut cur, &catalog);
         cur.models_dev_models = model_index;
+        cur.models_dev_context = context_index;
+        changed += models_dev::fill_known_context(&mut cur);
         cur.pricing_synced_at = now.to_string();
         (changed, cur.clone())
     };
@@ -248,14 +270,29 @@ pub async fn sync_pricing(
     })
 }
 
+#[derive(Serialize)]
+pub struct AvailableModel {
+    pub id: String,
+    /// 上下文上限（token）；models.dev 没写就是 None
+    pub context: Option<u64>,
+}
+
 /// 这个服务商当前提供哪些模型（models.dev 数据，按发布日期新→旧），
-/// 供模型名输入框做补全。认不出这家服务商、或还没同步过时返回空。
+/// 供模型选择器列出。认不出这家服务商、或还没同步过时返回空。
 #[tauri::command]
-pub fn available_models(state: State<'_, Arc<ProxyState>>, target_url: String) -> Vec<String> {
+pub fn available_models(state: State<'_, Arc<ProxyState>>, target_url: String) -> Vec<AvailableModel> {
     let c = state.config.read().unwrap_or_else(|e| e.into_inner());
-    models_dev::provider_id_for_url(&target_url)
-        .and_then(|pid| c.models_dev_models.get(pid))
-        .cloned()
+    let Some(pid) = models_dev::provider_id_for_url(&target_url) else {
+        return Vec::new();
+    };
+    let contexts = c.models_dev_context.get(pid);
+    c.models_dev_models
+        .get(pid)
+        .map(|ids| {
+            ids.iter()
+                .map(|id| AvailableModel { id: id.clone(), context: contexts.and_then(|m| m.get(id)).copied() })
+                .collect()
+        })
         .unwrap_or_default()
 }
 

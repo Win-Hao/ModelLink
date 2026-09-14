@@ -580,6 +580,78 @@ pub fn apply_to_claude_desktop(config: &Config) -> Result<String, String> {
     Ok(msg)
 }
 
+/// Claude Desktop 眼下实际在用的那份网关配置里，和 ModelLink 有关的部分。
+///
+/// 概览页据此判断每个槽位「已生效 / 未应用」：比的是 Claude 那边真正写着的东西，
+/// 而不是 ModelLink 自己记得写过什么 —— 配置被 Claude 或别的工具改过时也照实显示。
+#[derive(serde::Serialize, Default, Debug, PartialEq)]
+pub struct AppliedState {
+    /// 找到并读懂了那份配置文件
+    pub found: bool,
+    /// `inferenceProvider`（ModelLink 写的是 "gateway"）
+    pub provider: String,
+    /// `inferenceGatewayBaseUrl`
+    pub gateway_url: String,
+    pub models: Vec<AppliedModel>,
+}
+
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct AppliedModel {
+    pub slot: String,
+    /// `labelOverride`；老版本写入的条目没有这个字段，为空
+    pub label: String,
+    pub supports_1m: bool,
+}
+
+/// 从网关配置 JSON 里摘出 [`AppliedState`]。字段缺失或类型不对一律按「没有」处理。
+fn parse_applied_state(json: &serde_json::Value) -> AppliedState {
+    let text = |key: &str| json.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let models = json
+        .get("inferenceModels")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let slot = m.get("name")?.as_str()?.to_string();
+                    Some(AppliedModel {
+                        slot,
+                        label: m.get("labelOverride").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        supports_1m: m.get("supports1m").and_then(|v| v.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    AppliedState { found: true, provider: text("inferenceProvider"), gateway_url: text("inferenceGatewayBaseUrl"), models }
+}
+
+/// Claude Desktop 正在用的那份网关配置文件（不保证存在）。选文件的规则与写入时一致：
+/// `_meta.json` 里 `appliedId` 指向的文件存在就用它，否则是 ModelLink 自己那份。
+pub fn applied_config_file() -> Option<PathBuf> {
+    let config_lib = claude_3p_dir()?.join("configLibrary");
+    let our_id = "a0a0a0a0-b1b1-4c2c-9d3d-e4e4e4e4e4e4";
+    let applied_id = std::fs::read_to_string(config_lib.join("_meta.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|m| m.get("appliedId").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default();
+    let target_id = if !applied_id.is_empty() && config_lib.join(format!("{}.json", applied_id)).exists() {
+        applied_id
+    } else {
+        our_id.to_string()
+    };
+    Some(config_lib.join(format!("{}.json", target_id)))
+}
+
+/// 读回 Claude Desktop 正在用的网关配置（只读）。
+pub fn read_applied_state() -> AppliedState {
+    applied_config_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|json| parse_applied_state(&json))
+        .unwrap_or_default()
+}
+
 struct ScopeGuard<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for ScopeGuard<F> {
     fn drop(&mut self) { if let Some(f) = self.0.take() { f(); } }
@@ -587,6 +659,21 @@ impl<F: FnOnce()> Drop for ScopeGuard<F> {
 fn scopeguard<F: FnOnce()>(f: F) -> ScopeGuard<F> { ScopeGuard(Some(f)) }
 
 static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 系统账户里登记的主目录（不看 HOME 环境变量）。
+#[cfg(target_os = "macos")]
+fn login_home() -> Option<String> {
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
+    };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) }.to_str().ok().map(String::from)
+}
 
 pub fn restart_claude_desktop() {
     if RESTARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -611,9 +698,15 @@ pub fn restart_claude_desktop() {
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let _ = std::process::Command::new("open")
-                .args(["-a", "Claude"])
-                .output();
+            let mut open = std::process::Command::new("open");
+            open.args(["-a", "Claude"]);
+            // Claude 会继承这里的环境变量。平时 ModelLink 的 HOME 就是用户主目录，
+            // 但用临时 HOME 跑 ModelLink 时（界面预览、回归）继承下去的 Claude 找不到钥匙串，
+            // 会弹「找不到用于储存 "Claude Key" 的钥匙串」，读的也是临时目录里的配置。
+            if let Some(home) = login_home() {
+                open.env("HOME", home);
+            }
+            let _ = open.output();
             eprintln!("[restart] Claude Desktop restarted.");
         }
         #[cfg(target_os = "windows")]
@@ -1034,6 +1127,62 @@ mod tests {
                 "supports1m": false,
                 "labelOverride": "mimo-v2.5-pro"
             })
+        );
+    }
+
+    /// 重启 Claude 时要给它真实主目录 —— 哪怕 ModelLink 自己是用临时 HOME 跑的。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn login_home_is_a_real_home_directory() {
+        let home = login_home().expect("应当能从账户信息里拿到主目录");
+        assert!(home.starts_with('/') && !home.starts_with("/tmp"), "{home}");
+        assert!(std::path::Path::new(&home).is_dir());
+    }
+
+    /// 概览页的「已生效」读的就是这份东西 —— 写进去什么，读回来就得是什么。
+    #[test]
+    fn applied_state_reads_back_what_apply_writes() {
+        let cfg = cfg_with(vec![
+            ModelEntry { name: "Kimi-k2.6".into(), to_1m: "auto".into(), ..Default::default() },
+            ModelEntry { name: "mimo-v2.5-pro".into(), to_1m: "".into(), ..Default::default() },
+        ]);
+        let mut written = serde_json::json!({ "someUserSetting": 1 });
+        write_gateway_keys(&mut written, 5679, &VersionGate::with_version(None));
+        written["inferenceModels"] = serde_json::json!(inference_models_entries(&flatten_config(&cfg)));
+
+        assert_eq!(
+            parse_applied_state(&written),
+            AppliedState {
+                found: true,
+                provider: "gateway".into(),
+                gateway_url: "http://127.0.0.1:5679".into(),
+                models: vec![
+                    AppliedModel { slot: "claude-opus-5".into(), label: "Kimi-k2.6".into(), supports_1m: true },
+                    AppliedModel { slot: "claude-sonnet-5".into(), label: "mimo-v2.5-pro".into(), supports_1m: false },
+                ],
+            }
+        );
+    }
+
+    /// 老版本写的条目没有 labelOverride / supports1m；坏条目（没有 name）直接跳过，不连累整份。
+    #[test]
+    fn applied_state_tolerates_old_and_broken_entries() {
+        let json = serde_json::json!({
+            "inferenceModels": [
+                { "name": "claude-3-opus-latest", "supports1m": true },
+                { "labelOverride": "no-slot" },
+                { "name": "claude-3-5-sonnet-latest" },
+            ]
+        });
+        let st = parse_applied_state(&json);
+        assert!(st.found);
+        assert_eq!(st.provider, "");
+        assert_eq!(
+            st.models,
+            vec![
+                AppliedModel { slot: "claude-3-opus-latest".into(), label: "".into(), supports_1m: true },
+                AppliedModel { slot: "claude-3-5-sonnet-latest".into(), label: "".into(), supports_1m: false },
+            ]
         );
     }
 }

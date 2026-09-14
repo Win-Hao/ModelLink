@@ -136,7 +136,7 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
   让 effort 的投机分支先命中就会删错字段。明确点名的整流器优先，投机分支排最后。
 - **前端 hooks 不能放在 early return 之后**（`if (!draft || !p) return null;`）——tsc 查不出来。
 - **后端专管的字段要在 `save_config` 里保住**（`pricing_synced` / `context_limit` /
-  `models_dev_models` / `last_applied_*`）。否则前端一份旧草稿保存下去就会抹掉后台同步的结果。
+  `models_dev_models` / `models_dev_context` / `last_applied_*`）。否则前端一份旧草稿保存下去就会抹掉后台同步的结果。
   这类字段进 `canonical_hash`，所以 dirty 判定必须用**后端返回的那份**配置算，用草稿算必然出错。
 - **`[1m]` 后缀永远不会到代理**：引擎会剥掉它、改发 `anthropic-beta: context-1m-2025-08-07` 头。
 - **本机挂着系统 HTTP 代理时，reqwest 连 127.0.0.1 也会走代理**（macOS 代理例外列表不生效）：
@@ -144,6 +144,8 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
 - **Chat 模式的系统提示词里没有当前模型 ID**：只在 `organizationInstructions` 里列全部
   「代号 = 模型」，模型不知道自己是哪一条，映射一多就猜错。代理转发时按请求把那段说明换成
   这一次的真实模型（`identity.rs`），并要求模型别把代号、槽位这些内部细节说给用户听。
+- **「已生效」看的是 Claude 那边真正写着的东西**：概览页逐槽位比对 `applied_state`
+  （读回网关配置），不是 ModelLink 自己记得写过什么。配置被别的工具改过时照实显示「未应用」。
 
 ---
 

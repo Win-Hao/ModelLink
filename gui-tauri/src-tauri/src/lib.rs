@@ -101,16 +101,15 @@ pub fn run() {
                     // 先判要不要同步 —— api.json 有 4.5 MB，不到 6 小时阈值就别下
                     {
                         let cur = st.config.read().unwrap_or_else(|e| e.into_inner());
+                        // 2.2 起还要存模型上下文：老用户升级后没有这份数据就补抓一次，不等 6 小时
                         if !cur.pricing_auto_sync
-                            || !models_dev::is_stale(
-                                &cur.pricing_synced_at,
-                                models_dev::now_secs(),
-                            )
+                            || (!models_dev::is_stale(&cur.pricing_synced_at, models_dev::now_secs())
+                                && !cur.models_dev_context.is_empty())
                         {
                             return;
                         }
                     }
-                    let (catalog, model_index) = match models_dev::fetch_catalog(&st.client).await {
+                    let (catalog, model_index, context_index) = match models_dev::fetch_catalog(&st.client).await {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("[pricing] 启动同步失败（保持旧费率）: {}", e);
@@ -119,8 +118,10 @@ pub fn run() {
                     };
                     let (changed, snapshot) = {
                         let mut cur = st.config.write().unwrap_or_else(|e| e.into_inner());
-                        let changed = models_dev::apply_catalog(&mut cur, &catalog);
+                        let mut changed = models_dev::apply_catalog(&mut cur, &catalog);
                         cur.models_dev_models = model_index;
+                        cur.models_dev_context = context_index;
+                        changed += models_dev::fill_known_context(&mut cur);
                         cur.pricing_synced_at = models_dev::now_secs().to_string();
                         (changed, cur.clone())
                     };
@@ -202,6 +203,8 @@ pub fn run() {
             commands::sync_pricing,
             commands::available_models,
             commands::desktop_info,
+            commands::applied_state,
+            commands::reveal_claude_config,
             commands::force_quit_and_relaunch
         ])
         .run(tauri::generate_context!())

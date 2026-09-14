@@ -16,12 +16,13 @@
         "title": "ModelLink — Winhao学AI",
         "visible": true,
         "center": true,
-        "width": 880,
-        "height": 640,
-        "minWidth": 800,
-        "minHeight": 560,
+        "width": 1050,
+        "height": 700,
+        "minWidth": 920,
+        "minHeight": 620,
         "resizable": true,
         "titleBarStyle": "Overlay",
+        "trafficLightPosition": { "x": 21, "y": 34 },
         "hiddenTitle": true
       }
     ],

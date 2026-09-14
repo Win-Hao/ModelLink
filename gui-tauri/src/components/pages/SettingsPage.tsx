@@ -1,20 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import { KEY_FEATURE_NAMES, formatAppliedAt } from "@/lib/presets";
-import { desktopInfo, guiVersion, proxyStatus, syncPricing } from "@/lib/ipc";
+import {
+  appliedState,
+  desktopInfo,
+  guiVersion,
+  proxyStatus,
+  revealClaudeConfig,
+  syncPricing,
+  testProvider,
+} from "@/lib/ipc";
+import { KEY_FEATURE_NAMES, formatSince, providerDisplayName } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { useUpdaterCtx } from "@/lib/updaterContext";
+import { cn } from "@/lib/utils";
 
 const THEME_TABS: { value: ThemePref; label: string }[] = [
   { value: "light", label: "亮色" },
@@ -22,7 +32,196 @@ const THEME_TABS: { value: ThemePref; label: string }[] = [
   { value: "system", label: "跟随系统" },
 ];
 
-/** 设置页（design.md §6.4）：外观 / 代理端口 / 兼容模式 / 开机自启 / 软件更新 / 关于。 */
+function Group({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="mt-[15px] first:mt-0">
+      <h2 className="mb-2 ml-0.5 text-label tracking-[0.06em] text-fg3">{title}</h2>
+      <div className="panel">{children}</div>
+    </section>
+  );
+}
+
+function Row({ title, sub, children }: { title: string; sub?: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="flex items-center gap-[18px] border-b border-hair px-[22px] py-3 last:border-b-0">
+      <div className="min-w-0 flex-1">
+        <div className="text-body">{title}</div>
+        {sub && <div className="mt-[3px] text-[11.5px] leading-[1.55] text-fg3">{sub}</div>}
+      </div>
+      {children && <div className="flex flex-none items-center gap-2.5">{children}</div>}
+    </div>
+  );
+}
+
+type Check = { key: string; state: "ok" | "bad" | "pending"; text: string; fix?: () => void };
+
+/**
+ * 一键排查（design-2.2.md §6.4）：用户在 Claude 里报错时第一反应就是来设置页翻。
+ * 四项检查常驻在页面上；本地能判断的实时算，服务商连通要真发请求，点「检查」才测。
+ */
+function Diagnostics({ onFixPort }: { onFixPort: () => void }) {
+  const { draft, applyState, verificationFor, recordVerification, setPage, gotoProvider } =
+    useAppStore();
+  const qc = useQueryClient();
+  const statusQ = useQuery({ queryKey: ["proxy-status"], queryFn: proxyStatus });
+  const appliedQ = useQuery({ queryKey: ["applied-state"], queryFn: appliedState });
+  const [running, setRunning] = useState(false);
+  const [ran, setRan] = useState(false);
+
+  const providers = draft?.providers ?? [];
+  const complete = (i: number) => {
+    const p = providers[i];
+    return !!p.target_url && !!p.api_key && p.models.some((m) => m.name);
+  };
+
+  const run = async () => {
+    setRunning(true);
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["proxy-status"] }),
+      qc.invalidateQueries({ queryKey: ["applied-state"] }),
+      ...providers.map(async (p, i) => {
+        if (!complete(i)) return; // 没填全的不测，下面单独点名
+        const model = p.models.find((m) => m.name)!.name;
+        try {
+          const r = await testProvider(p.target_url, p.api_key, model);
+          recordVerification(p, { ok: r.ok, at: Date.now(), message: r.message });
+        } catch (e) {
+          recordVerification(p, { ok: false, at: Date.now(), message: String(e) });
+        }
+      }),
+    ]);
+    setRunning(false);
+    setRan(true);
+  };
+
+  const checks: Check[] = [];
+  const toOverview = () => setPage("overview");
+
+  const st = statusQ.data;
+  if (st) {
+    checks.push(
+      st.running
+        ? { key: "port", state: "ok", text: `端口 ${st.port} 未被占用` }
+        : { key: "port", state: "bad", text: `端口 ${st.port} 被占用，代理没能启动`, fix: onFixPort },
+    );
+  }
+
+  const a = appliedQ.data;
+  if (a && st) {
+    if (!a.found) {
+      checks.push({ key: "claude", state: "bad", text: "没找到 Claude Desktop 的配置" });
+    } else if (a.provider !== "gateway" || a.gateway_url !== `http://127.0.0.1:${st.port}`) {
+      checks.push({ key: "claude", state: "bad", text: "Claude Desktop 没接到 ModelLink", fix: toOverview });
+    } else if (a.models.length === 0) {
+      checks.push({ key: "claude", state: "bad", text: "Claude Desktop 里还没有模型", fix: toOverview });
+    } else {
+      checks.push({ key: "claude", state: "ok", text: "Claude Desktop 配置已写入" });
+    }
+  }
+
+  if (providers.length === 0) {
+    checks.push({ key: "keys", state: "bad", text: "还没有服务商", fix: () => setPage("providers") });
+  } else if (running) {
+    checks.push({ key: "keys", state: "pending", text: "正在测试服务商连接…" });
+  } else {
+    const incomplete = providers.findIndex((_, i) => !complete(i));
+    const results = providers.map((p) => verificationFor(p));
+    const failed = results.findIndex((v) => v && !v.ok);
+    const failedCount = results.filter((v) => v && !v.ok).length;
+    const untested = results.filter((v) => !v).length;
+    const nameOf = (i: number) => providerDisplayName(providers[i].target_url, i);
+    if (incomplete >= 0) {
+      checks.push({
+        key: "keys",
+        state: "bad",
+        text: `「${nameOf(incomplete)}」还没填完`,
+        fix: () => gotoProvider(incomplete),
+      });
+    } else if (failed >= 0) {
+      checks.push({
+        key: "keys",
+        state: "bad",
+        text: failedCount === 1 ? `「${nameOf(failed)}」连不上` : `${failedCount} 家服务商连不上`,
+        fix: () => gotoProvider(failed),
+      });
+    } else if (untested > 0) {
+      checks.push({
+        key: "keys",
+        state: "pending",
+        text: `${untested} 家服务商还没测试过连接`,
+        fix: () => void run(),
+      });
+    } else {
+      checks.push({
+        key: "keys",
+        state: "ok",
+        text: providers.length === 1 ? "服务商密钥已连通" : `${providers.length} 家服务商密钥全部连通`,
+      });
+    }
+  }
+
+  // 最常见的售后原因：改了配置忘了点「应用」
+  checks.push(
+    applyState === "clean"
+      ? { key: "apply", state: "ok", text: "配置已生效" }
+      : applyState === "applying"
+        ? { key: "apply", state: "pending", text: "正在应用…" }
+        : applyState === "error"
+          ? { key: "apply", state: "bad", text: "上次应用没成功", fix: toOverview }
+          : { key: "apply", state: "bad", text: "配置已修改但尚未应用", fix: toOverview },
+  );
+
+  return (
+    <div className="flex items-center gap-3.5 border-b border-hair px-[22px] py-[13px]">
+      <div className="min-w-0 flex-1">
+        <div className="text-body">一键排查</div>
+        <div className="mt-[3px] text-[11.5px] text-fg3">
+          Claude 里连不上、模型不见了、突然变贵了 —— 先点这里，三秒出结论
+        </div>
+        <div className="mt-[9px] flex flex-wrap gap-[7px]">
+          {checks.map((c) => {
+            const cls = cn(
+              "flex items-center gap-1.5 rounded-[7px] px-[9px] py-1 text-[11.5px] inset-ring",
+              c.state === "ok" && "text-fg2 inset-ring-hair2",
+              c.state === "pending" && "text-fg3 inset-ring-hair2",
+              c.state === "bad" && "text-danger inset-ring-danger/30",
+            );
+            const dot = (
+              <i
+                className={cn(
+                  "size-[5px] flex-none rounded-full",
+                  c.state === "ok" ? "bg-ok" : c.state === "bad" ? "bg-danger" : "bg-hair2",
+                )}
+              />
+            );
+            return c.fix ? (
+              <button
+                key={c.key}
+                onClick={c.fix}
+                className={cn(cls, "transition-colors", c.state === "bad" ? "hover:bg-danger/5" : "hover:bg-hair")}
+                title={c.state === "bad" ? "去处理" : undefined}
+              >
+                {dot}
+                {c.text} →
+              </button>
+            ) : (
+              <span key={c.key} className={cls}>
+                {dot}
+                {c.text}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+      <Button variant="ghost" onClick={() => void run()} disabled={running}>
+        {running && <Loader2 className="animate-spin" />}
+        {ran ? "重新检查" : "开始检查"}
+      </Button>
+    </div>
+  );
+}
+
+/** 设置页（design-2.2.md §6.4）：常用 / 高级 / 出问题时。 */
 export function SettingsPage() {
   const { pref, setPref } = useTheme();
   const { changePort, draft, updateDraft, reloadConfig } = useAppStore();
@@ -32,8 +231,10 @@ export function SettingsPage() {
   const versionQ = useQuery({ queryKey: ["gui-version"], queryFn: guiVersion });
   const autostartQ = useQuery({ queryKey: ["autostart"], queryFn: () => isEnabled() });
   const statusQ = useQuery({ queryKey: ["proxy-status"], queryFn: proxyStatus });
+  const desktopQ = useQuery({ queryKey: ["desktop-info"], queryFn: desktopInfo });
 
   // 端口输入（本地编辑态，blur/Enter 提交热切换）
+  const portRef = useRef<HTMLInputElement>(null);
   const [portText, setPortText] = useState("");
   const [switching, setSwitching] = useState(false);
   useEffect(() => {
@@ -62,11 +263,6 @@ export function SettingsPage() {
     setSwitching(false);
   };
 
-  const desktopQ = useQuery({ queryKey: ["desktop-info"], queryFn: desktopInfo });
-  const unavailable = (desktopQ.data?.unavailable ?? []).map(
-    (k) => KEY_FEATURE_NAMES[k] ?? k,
-  );
-
   // 手动同步费率：无视自动开关与 6 小时阈值
   const [syncing, setSyncing] = useState(false);
   const runSync = async () => {
@@ -77,6 +273,7 @@ export function SettingsPage() {
       else if (r.changed > 0) toast.success(`费率已更新：${r.changed} 个模型`);
       else toast.success("费率已是最新");
       await reloadConfig();
+      await qc.invalidateQueries({ queryKey: ["available-models"] });
     } catch (e) {
       toast.error(`费率同步失败：${String(e)}`);
     }
@@ -93,6 +290,14 @@ export function SettingsPage() {
     await qc.invalidateQueries({ queryKey: ["autostart"] });
   };
 
+  const revealConfig = async () => {
+    try {
+      await revealClaudeConfig();
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   const version = versionQ.data ?? "";
   const updateSub = updater.state.hasUpdate
     ? `当前 ${version} · 发现新版本 v${updater.state.newVersion}`
@@ -100,165 +305,124 @@ export function SettingsPage() {
       ? `当前 ${version} · 已是最新版本`
       : `当前 ${version}`;
 
-  return (
-    <>
-      <header className="flex items-end justify-between gap-3.5 px-6 pb-3.5 pt-[46px]">
-        <div>
-          <h1 className="text-[19px] font-[650] leading-[1.25] tracking-[-0.01em]">设置</h1>
-        </div>
-      </header>
+  const unavailable = (desktopQ.data?.unavailable ?? []).map((k) => KEY_FEATURE_NAMES[k] ?? k);
+  const syncedSince = formatSince(draft?.pricing_synced_at);
 
-      <div className="flex flex-1 flex-col overflow-y-auto px-6 pb-6 pt-0.5">
-        <div className="rounded-xl border bg-card">
-          {/* 外观 */}
-          <div className="flex items-center justify-between px-4 py-3">
-            <div>
-              <div className="text-[13px] font-medium">外观</div>
-            </div>
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageHeader title="设置" sub="常用的在上面，出问题才用的在下面。" className="pb-[18px]" />
+
+      <div className="min-h-0 flex-1 overflow-y-auto pb-5">
+        <Group title="常用">
+          <Row title="外观">
             <Tabs value={pref} onValueChange={(v) => setPref(v as ThemePref)}>
-              <TabsList className="h-auto gap-[2px] rounded-[9px] border bg-background p-[2px]">
+              <TabsList>
                 {THEME_TABS.map((t) => (
-                  <TabsTrigger
-                    key={t.value}
-                    value={t.value}
-                    className="rounded-[7px] border-none px-2.5 py-1 text-[11.5px] text-muted-foreground data-[state=active]:bg-card data-[state=active]:font-semibold data-[state=active]:text-foreground data-[state=active]:shadow-[0_1px_3px_rgba(0,0,0,.12)] dark:data-[state=active]:shadow-none"
-                  >
+                  <TabsTrigger key={t.value} value={t.value}>
                     {t.label}
                   </TabsTrigger>
                 ))}
               </TabsList>
             </Tabs>
-          </div>
-
-          {/* 代理端口（2026-07-14 用户新增：热切换 + 冲突自救） */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div>
-              <div className="text-[13px] font-medium">代理端口</div>
-              <div className="mt-px text-[11px] text-faint">
-                修改后立即生效，需重新应用到 Claude Desktop
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {switching && <Loader2 size={12} className="animate-spin text-faint" />}
-              <Input
-                value={portText}
-                onChange={(e) => setPortText(e.target.value.replace(/[^0-9]/g, ""))}
-                onBlur={() => void submitPort()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                }}
-                disabled={switching}
-                inputMode="numeric"
-                className="mono h-[29px] w-[88px] rounded-[9px] border-input bg-input-bg px-2.5 text-center text-xs md:text-xs shadow-none dark:bg-input-bg"
-              />
-            </div>
-          </div>
-
-          {/* 费率同步（2.1-B §3.1）：数据源 models.dev，社区维护的开源模型数据库 */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div className="pr-4">
-              <div className="text-[13px] font-medium">自动同步模型费率</div>
-              <div className="mt-px text-[11px] text-faint">
-                启动时从 models.dev 拉取官方价（最多 6 小时一次）·{" "}
-                {draft?.pricing_synced_at
-                  ? `上次同步 ${formatAppliedAt(draft.pricing_synced_at) ?? "—"}`
-                  : "尚未同步"}
-                <br />
-                手填的费率不会被覆盖
-              </div>
-            </div>
-            <div className="flex flex-none items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={() => void runSync()}
-                disabled={syncing}
-                className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
-              >
-                {syncing && <Loader2 size={12} className="animate-spin" />}
-                立即同步
-              </Button>
-              <Switch
-                checked={draft?.pricing_auto_sync ?? true}
-                disabled={!draft}
-                onCheckedChange={(ck) =>
-                  updateDraft((c) => {
-                    c.pricing_auto_sync = ck;
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          {/* 开机自启 */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div>
-              <div className="text-[13px] font-medium">开机自启</div>
-              <div className="mt-px text-[11px] text-faint">登录时自动启动代理</div>
-            </div>
+          </Row>
+          <Row title="开机自启" sub="登录时自动启动代理">
             <Switch
               checked={autostartQ.data ?? false}
               onCheckedChange={(ck) => void toggleAutostart(ck)}
+              aria-label="开机自启"
             />
-          </div>
-
-          {/* 软件更新 */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div>
-              <div className="text-[13px] font-medium">软件更新</div>
-              <div className="mt-px text-[11px] text-faint">
-                <span className="mono">{updateSub}</span>
-              </div>
-            </div>
+          </Row>
+          <Row title="软件更新" sub={<span className="mono">{updateSub}</span>}>
             <Button
-              variant="outline"
+              variant="ghost"
+              size="sm"
               onClick={() => void updater.manualCheck()}
               disabled={updater.state.isChecking}
-              className="h-[29px] rounded-[9px] bg-card px-3 text-xs font-medium shadow-none dark:border-border dark:bg-card"
             >
-              {updater.state.isChecking && <Loader2 size={12} className="animate-spin" />}
+              {updater.state.isChecking && <Loader2 className="animate-spin" />}
               检查更新
             </Button>
-          </div>
+          </Row>
+        </Group>
 
-          {/* 检测到的 Claude Desktop 版本（2.1-E §3.8） */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div className="pr-4">
-              <div className="text-[13px] font-medium">Claude Desktop</div>
-              <div className="mt-px text-[11px] text-faint">
-                {desktopQ.data?.version ? (
-                  <>
-                    检测到 <span className="mono">{desktopQ.data.version}</span>
-                    {unavailable.length > 0 ? (
-                      <> · 版本过低，暂不可用：{unavailable.join("、")}</>
-                    ) : (
-                      <> · 全部能力可用</>
-                    )}
-                  </>
-                ) : (
-                  "未检测到安装（写入时不做版本裁剪）"
-                )}
-              </div>
-            </div>
-          </div>
+        <Group title="高级">
+          <Row title="代理端口" sub="修改后立即生效，需要重新应用到 Claude Desktop">
+            {switching && <Loader2 size={12} className="animate-spin text-fg3" />}
+            <Input
+              ref={portRef}
+              value={portText}
+              onChange={(e) => setPortText(e.target.value.replace(/[^0-9]/g, ""))}
+              onBlur={() => void submitPort()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+              disabled={switching}
+              inputMode="numeric"
+              aria-label="代理端口"
+              className="w-[92px] text-center"
+            />
+          </Row>
+          <Row
+            title="自动同步模型费率"
+            sub={
+              <>
+                启动时从 models.dev 拉取各家官方价（最多 6 小时一次）·{" "}
+                {syncedSince ? `上次同步 ${syncedSince}` : "还没同步过"}
+              </>
+            }
+          >
+            <Button variant="ghost" size="sm" onClick={() => void runSync()} disabled={syncing}>
+              {syncing && <Loader2 className="animate-spin" />}
+              立即同步
+            </Button>
+            <Switch
+              checked={draft?.pricing_auto_sync ?? true}
+              disabled={!draft}
+              onCheckedChange={(ck) =>
+                updateDraft((c) => {
+                  c.pricing_auto_sync = ck;
+                })
+              }
+              aria-label="自动同步模型费率"
+            />
+          </Row>
+        </Group>
 
-          {/* 关于 */}
-          <div className="flex items-center justify-between border-t px-4 py-3">
-            <div>
-              <div className="text-[13px] font-medium">关于</div>
-              <div className="mt-px text-[11px] text-faint">
-                ModelLink by Winhao学AI · 免费软件 · 不可商业化
-              </div>
-            </div>
-            <button
-              onClick={() => void openUrl(GITHUB_URL)}
-              className="flex items-center gap-[5px] text-[12.5px] text-muted-foreground transition-colors hover:text-foreground"
-            >
+        <Group title="出问题时">
+          <Diagnostics
+            onFixPort={() => {
+              portRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+              portRef.current?.focus();
+            }}
+          />
+          <Row
+            title="Claude Desktop"
+            sub={
+              desktopQ.data?.version ? (
+                <>
+                  检测到 <span className="mono">{desktopQ.data.version}</span>
+                  {unavailable.length > 0
+                    ? ` · 版本过低，暂不可用：${unavailable.join("、")}`
+                    : " · 全部能力可用"}
+                </>
+              ) : (
+                "没检测到安装（写入配置时不按版本裁剪）"
+              )
+            }
+          >
+            <Button variant="ghost" size="sm" onClick={() => void revealConfig()}>
+              打开配置目录
+              <ExternalLink />
+            </Button>
+          </Row>
+          <Row title="关于" sub="ModelLink by Winhao学AI · 免费软件 · 不可商业化">
+            <Button variant="ghost" size="sm" onClick={() => void openUrl(GITHUB_URL)}>
               GitHub
-              <ExternalLink size={11} />
-            </button>
-          </div>
-        </div>
+              <ExternalLink />
+            </Button>
+          </Row>
+        </Group>
       </div>
-    </>
+    </div>
   );
 }

@@ -48,6 +48,9 @@ export type Config = {
   pricing_synced_at?: string;
 };
 
+/** 服务商在 models.dev 上列出的一个模型。 */
+export type AvailableModel = { id: string; context: number | null };
+
 /** 检测到的 Claude Desktop 版本 + 因版本过低不可用的键（§3.8）。 */
 export type DesktopInfo = { version: string | null; unavailable: string[] };
 
@@ -61,16 +64,71 @@ export type PricingSyncResult = {
 
 export type ProxyStatus = { running: boolean; port: number };
 
+/** Claude Desktop 实际在用的网关配置里的一个模型条目。 */
+export type AppliedModel = {
+  slot: string;
+  /** labelOverride；老版本写入的条目没有，为空 */
+  label: string;
+  supports_1m: boolean;
+};
+
+/** Claude Desktop 实际在用的网关配置（只读读回）。 */
+export type AppliedState = {
+  /** 找到并读懂了那份配置文件 */
+  found: boolean;
+  provider: string;
+  gateway_url: string;
+  models: AppliedModel[];
+};
+
+/** 上游 usage 里的 token 数。 */
+export type Usage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+};
+
 export type LogEntry = {
+  id: number;
   time: string;
+  /** Claude 请求的槽位名（原样，可能带 [1m]）。 */
+  slot: string;
+  /** 实际发给上游的模型名；未映射时就是请求的槽位名。 */
   model: string;
   status: number;
   /** 实际发给上游的推理强度（""=未发 / "off" / low…max）。 */
   thinking: string;
-  /** 附注：整流标记 / 未映射槽位等，多条以 " · " 连接。 */
+  /** 附注：整流标记 / 未映射槽位等，多条以「；」连接（标记文字里自带「 · 」）。 */
   note: string;
   /** ModelLink 自己判定为错误的请求（标红）。 */
   error: boolean;
+  /** 耗时（毫秒）；null = 还在传。 */
+  duration_ms: number | null;
+  /** 上游没给、或响应中途断开时为 null。 */
+  usage: Usage | null;
+  /** 按这个模型的费率算出的花费（USD）；没费率或没用量时为 null —— 绝不估算。 */
+  cost_usd: number | null;
+  /** 出错时上游给的说明。 */
+  detail: string;
+};
+
+/** 今天的请求统计（不受「只留 100 条」限制）。 */
+export type TodayStats = {
+  /** 从这个时刻起算（Unix 秒）：本地零点，或 ModelLink 今天启动的时刻 */
+  since: number;
+  requests: number;
+  failures: number;
+  duration_total_ms: number;
+  duration_max_ms: number;
+  /** 输入侧合计（含缓存） */
+  input_tokens: number;
+  output_tokens: number;
+  /** 拿到用量的请求数 */
+  with_usage: number;
+  cost_usd: number;
+  /** 算得出花费的请求数；少于 with_usage 说明有模型没费率 */
+  priced: number;
 };
 
 export type TestResult = { ok: boolean; message: string };
@@ -84,11 +142,16 @@ export const testProvider = (targetUrl: string, apiKey: string, model: string) =
   invoke<TestResult>("test_provider", { targetUrl, apiKey, model });
 export const applyToClaude = () => invoke<string>("apply_to_claude");
 export const getLogs = () => invoke<LogEntry[]>("get_logs");
+export const getLogStats = () => invoke<TodayStats>("get_log_stats");
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");
 export const setPort = (port: number) => invoke<ProxyStatus>("set_port", { port });
 export const syncPricing = (force: boolean) =>
   invoke<PricingSyncResult>("sync_pricing", { force });
 export const desktopInfo = () => invoke<DesktopInfo>("desktop_info");
+/** 读回 Claude Desktop 眼下实际在用的网关配置（概览页逐槽位「已生效 / 未应用」的依据）。 */
+export const appliedState = () => invoke<AppliedState>("applied_state");
+/** 在访达 / 资源管理器里选中 Claude Desktop 正在用的配置文件（出问题时让用户发过来）。 */
+export const revealClaudeConfig = () => invoke<void>("reveal_claude_config");
 /** 该服务商当前提供的模型（models.dev，按发布日期新→旧）；认不出或未同步时为空。 */
 export const availableModels = (targetUrl: string) =>
-  invoke<string[]>("available_models", { targetUrl });
+  invoke<AvailableModel[]>("available_models", { targetUrl });

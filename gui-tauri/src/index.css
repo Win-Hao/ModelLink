@@ -2,149 +2,200 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Outfit 变量字体（拉丁+数字），本地打包不走 CDN；中文回退 PingFang/雅黑。 */
+/* index.html 首帧前按 UA 给 <html> 挂 .mac —— macOS 用 Overlay 标题栏，红绿灯悬浮在顶栏里 */
+@custom-variant mac (&:is(.mac *));
+
+/* ============ 字体（docs/design-2.2.md §3） ============
+   拉丁 Archivo + 等宽 Spline Sans Mono，本地打包 woff2 子集，不走 CDN（见 assets/fonts/README.md）。
+   中文不打包，回退 PingFang SC / 微软雅黑。 */
 @font-face {
-  font-family: "Outfit";
-  src: url("./assets/fonts/outfit-latin.woff2") format("woff2");
+  font-family: "Archivo";
+  src: url("./assets/fonts/archivo-latin.woff2") format("woff2");
   font-weight: 400 700;
   font-style: normal;
   font-display: swap;
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
-    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Spline Sans Mono";
+  src: url("./assets/fonts/spline-sans-mono-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193,
     U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-/* ============ 色板（docs/design.md §2，已冻结） ============ */
+/* ============ 色板（design-2.2.md §2） ============
+   全局只有一个强调色，每页最多用两次；层级靠明度和字重，不靠色块。
+   深色 = 同一套结构只换变量，圆角 / 间距 / 字阶一行不改。 */
 :root {
-  --background: #faf9f5;
-  --foreground: #26231d;
-  --card: #ffffff;
-  --card-foreground: #26231d;
-  --popover: #ffffff;
-  --popover-foreground: #26231d;
-  --primary: #d97757;
-  --primary-foreground: #ffffff;
-  --primary-hover: #c4684a;
-  --primary-soft: rgba(217, 119, 87, 0.11);
-  --secondary: #f1eee6;
-  --secondary-foreground: #26231d;
-  --muted: #f1eee6;
-  --muted-foreground: #6f6a60;
-  --accent: #f3f0e9;
-  --accent-foreground: #26231d;
-  --destructive: #c9534c;
-  --destructive-foreground: #ffffff;
-  --destructive-soft: rgba(201, 83, 76, 0.1);
-  --border: rgba(38, 35, 29, 0.11);
-  --input: rgba(38, 35, 29, 0.11);
-  --input-bg: #ffffff;
-  --ring: #d97757;
-  --faint: #a39d91;
-  --success: #26836c;
-  --success-soft: rgba(38, 131, 108, 0.12);
-  --warning: #a97a1e;
-  --warning-soft: rgba(169, 122, 30, 0.12);
-  --sidebar: #f1eee6;
-  --sidebar-foreground: #26231d;
-  --sidebar-primary: #d97757;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #ffffff;
-  --sidebar-accent-foreground: #26231d;
-  --sidebar-border: rgba(38, 35, 29, 0.11);
-  --sidebar-ring: #d97757;
+  color-scheme: light;
+  --bg: #f7f6f2; /* 窗口底（暖纸） */
+  --panel: #ffffff;
+  --sunken: #faf9f6; /* 输入框底、下沉区 */
+  --hair: rgba(32, 28, 24, 0.085); /* 分隔发丝线 */
+  --hair2: rgba(32, 28, 24, 0.14); /* 描边、输入框边 */
+  --fg: #1c1a17;
+  --fg2: #5c574f;
+  --fg3: #87817a; /* 列头、说明 */
+  --accent: #b8532f; /* 陶土红 */
+  --accent-weak: rgba(184, 83, 47, 0.09);
+  --on-accent: #ffffff; /* 强调色按钮上的字 */
+  --ok: #26805f; /* 正常、已生效、已连通 */
+  --danger: #b3382f; /* 错误、删除 */
+
+  /* 阴影只有中性的，不许彩色辉光 */
+  --shadow: 0 1px 2px rgba(32, 28, 24, 0.05), 0 0 0 1px var(--hair);
+  --float: 0 6px 24px rgba(32, 28, 24, 0.14), 0 0 0 1px var(--hair2); /* 下拉、弹窗、toast */
 }
 
 .dark {
-  --background: #1b1d21;
-  --foreground: #edebe3;
-  --card: #24262c;
-  --card-foreground: #edebe3;
-  --popover: #24262c;
-  --popover-foreground: #edebe3;
-  --primary: #d97757;
-  --primary-foreground: #ffffff;
-  --primary-hover: #e08a6d;
-  --primary-soft: rgba(217, 119, 87, 0.16);
-  --secondary: #26282f;
-  --secondary-foreground: #edebe3;
-  --muted: #26282f;
-  --muted-foreground: #a5a094;
-  --accent: #2a2c33;
-  --accent-foreground: #edebe3;
-  --destructive: #e0685f;
-  --destructive-foreground: #ffffff;
-  --destructive-soft: rgba(224, 104, 95, 0.14);
-  --border: rgba(255, 255, 255, 0.1);
-  --input: rgba(255, 255, 255, 0.1);
-  --input-bg: #1f2126;
-  --ring: #d97757;
-  --faint: #716c62;
-  --success: #4db8a0;
-  --success-soft: rgba(77, 184, 160, 0.15);
-  --warning: #d4a843;
-  --warning-soft: rgba(212, 168, 67, 0.15);
-  --sidebar: #17181c;
-  --sidebar-foreground: #edebe3;
-  --sidebar-primary: #d97757;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #24262c;
-  --sidebar-accent-foreground: #edebe3;
-  --sidebar-border: rgba(255, 255, 255, 0.1);
-  --sidebar-ring: #d97757;
+  color-scheme: dark;
+  --bg: #0c0e10;
+  --panel: #14171a;
+  --sunken: #101315;
+  --hair: rgba(255, 255, 255, 0.065);
+  --hair2: rgba(255, 255, 255, 0.12);
+  --fg: #eceef0;
+  --fg2: #9aa2a9;
+  --fg3: #7d858d;
+  --accent: #e0b177; /* 暖沙，不是陶土红 —— 陶土红在深色底上发闷 */
+  --accent-weak: rgba(224, 177, 119, 0.11);
+  --on-accent: #191410;
+  --ok: #52b38b;
+  --danger: #e07b72;
+
+  --shadow: inset 0 0 0 1px var(--hair);
+  --float: 0 8px 28px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--hair2);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary-hover: var(--primary-hover);
-  --color-primary-soft: var(--primary-soft);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-sunken: var(--sunken);
+  --color-hair: var(--hair);
+  --color-hair2: var(--hair2);
+  --color-fg: var(--fg);
+  --color-fg2: var(--fg2);
+  --color-fg3: var(--fg3);
   --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-destructive-soft: var(--destructive-soft);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-input-bg: var(--input-bg);
-  --color-ring: var(--ring);
-  --color-faint: var(--faint);
-  --color-success: var(--success);
-  --color-success-soft: var(--success-soft);
-  --color-warning: var(--warning);
-  --color-warning-soft: var(--warning-soft);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
+  --color-accent-weak: var(--accent-weak);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+  --color-ring: var(--accent);
 
-  --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, "PingFang SC",
-    "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: "Archivo", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 所有技术值一律等宽：槽位名、模型名、URL、端口、时间戳、token 数、金额、计数 */
+  --font-mono: "Spline Sans Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  /* 圆角 token（design.md §4）：按钮/输入框 9 · 清单行 10 · 卡片 12 */
-  --radius-sm: 7px;
-  --radius-md: 9px;
-  --radius-lg: 10px;
-  --radius-xl: 12px;
+  --shadow-panel: var(--shadow);
+  --shadow-float: var(--float);
+
+  /* 圆角（§4）：logo 与小方块 6 · 输入框与小按钮 8 · 按钮 / tab / 输入框容器 10 · 面板 14 */
+  --radius-sm: 6px;
+  --radius-ctl: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* 字阶（§3）。⚠️ 11px 是功能性文字的硬下限 */
+  --text-title: 26px; /* 页面标题 */
+  --text-title--line-height: 1.15;
+  --text-title--letter-spacing: -0.03em;
+  --text-title--font-weight: 600;
+  --text-stat: 21px; /* 摘要大数字 */
+  --text-stat--line-height: 1;
+  --text-stat--letter-spacing: -0.035em;
+  --text-stat--font-weight: 600;
+  --text-heading: 15px; /* 面板头标题、品牌字标 */
+  --text-heading--line-height: 1.3;
+  --text-heading--letter-spacing: -0.018em;
+  --text-heading--font-weight: 600;
+  --text-data: 14.5px; /* 数据主值（模型名） */
+  --text-data--line-height: 1.35;
+  --text-data--letter-spacing: -0.012em;
+  --text-data--font-weight: 600;
+  --text-body: 13.5px; /* 正文、设置项 */
+  --text-body--line-height: 1.45;
+  --text-body--letter-spacing: -0.01em;
+  --text-body--font-weight: 500;
+  --text-label: 11px; /* 列头、字段标签 */
+  --text-label--line-height: 1.4;
+  --text-label--letter-spacing: 0.05em;
+  --text-label--font-weight: 600;
+}
+
+/* ============ 展开动效 ============
+   下拉、选择框、菜单、弹窗打开时从触发点轻轻展开，关闭时更快地收起。
+   Radix 会等收起动画播完再卸载；系统开了「减弱动态效果」时 base 层把动画整个关掉。
+   位移方向跟着弹出方向走：在触发器下方的往下落，上方的往上浮（--pop-x / --pop-y）。 */
+@theme {
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pop-in: pop-in 180ms var(--ease-out-expo) both;
+  --animate-pop-out: pop-out 110ms ease-in both;
+  --animate-fade-in: fade-in 180ms var(--ease-out-expo) both;
+  --animate-fade-out: fade-out 120ms ease-in both;
+
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translate(var(--pop-x, 0), var(--pop-y, 0)) scale(0.96);
+    }
+  }
+  @keyframes pop-out {
+    to {
+      opacity: 0;
+      transform: translate(var(--pop-x, 0), var(--pop-y, 0)) scale(0.97);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes fade-out {
+    to {
+      opacity: 0;
+    }
+  }
+}
+
+/* 弹出层按方向给位移：data-side 由 Radix 写在内容元素上 */
+@utility pop-offset {
+  &[data-side="bottom"] {
+    --pop-y: -4px;
+  }
+  &[data-side="top"] {
+    --pop-y: 4px;
+  }
+  &[data-side="left"] {
+    --pop-x: 4px;
+  }
+  &[data-side="right"] {
+    --pop-x: -4px;
+  }
+}
+
+/* 面板：14px 圆角 + 发丝线描边（深色是内描边）。2.2 不用 Card 组件。 */
+@utility panel {
+  background-color: var(--panel);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 红绿灯占住窗口左上角（tauri.conf.json 的 trafficLightPosition 把它垂直居中在顶栏里，右缘到 82px），品牌字标让到它右边再空 18px；窗口够宽、内容栏左缘本来就在它右边时不动 */
+@utility clear-traffic-lights {
+  margin-left: max(0px, calc(100px - max(24px, (100vw - 964px) / 2)));
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-hair outline-ring/50;
   }
   html,
   body,
@@ -152,7 +203,8 @@
     height: 100%;
   }
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    @apply bg-bg font-sans text-fg antialiased;
+    font-size: 13px;
     overflow: hidden; /* 桌面应用：滚动只发生在内容区内部 */
     -webkit-user-select: none;
     user-select: none;
@@ -170,7 +222,6 @@
   summary {
     cursor: pointer;
   }
-  /* 技术值（槽位名/模型名/URL/端口/时间戳/计数）一律 mono + 表格数字 */
   code,
   .mono {
     font-family: var(--font-mono);
@@ -183,47 +234,14 @@
   ::-webkit-scrollbar-track {
     background: transparent;
   }
+  /* 平时透明，只在滚动时出现（lib/scrollbars.ts 给正在滚的元素挂 data-scrolling） */
   ::-webkit-scrollbar-thumb {
-    background: rgba(128, 128, 128, 0.2);
+    background: transparent;
     border-radius: 3px;
   }
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgba(128, 128, 128, 0.35);
+  [data-scrolling]::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fg3) 45%, transparent);
   }
-}
-
-/* ============ 防篡改水印（useWatermark 维护，!important 锚定样式） ============ */
-.ml-wm {
-  display: block !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  padding: 8px 10px 12px !important;
-  font-size: 9.5px !important;
-  line-height: 1.5 !important;
-  color: var(--faint) !important;
-  pointer-events: none !important;
-  user-select: none !important;
-  -webkit-user-select: none !important;
-  clip-path: none !important;
-  filter: none !important;
-  transform: none !important;
-  overflow: visible !important;
-  height: auto !important;
-  width: auto !important;
-}
-/* 宿主（侧栏）被移除时的兜底形态：v1 式底部固定条 */
-.ml-wm-fixed {
-  position: fixed !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  right: 0 !important;
-  z-index: 2147483647 !important;
-  text-align: center !important;
-  padding: 10px 16px !important;
-  font-size: 12px !important;
-  background: var(--sidebar) !important;
-  border-top: 1px solid var(--border) !important;
-  color: var(--muted-foreground) !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

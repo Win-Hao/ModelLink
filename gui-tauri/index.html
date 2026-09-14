@@ -13,18 +13,20 @@
           p === "dark" ||
           (p === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
         document.documentElement.classList.toggle("dark", dark);
+        // macOS 用 Overlay 标题栏，顶栏要给红绿灯让位（index.css 的 mac: 变体）
+        document.documentElement.classList.toggle("mac", /Macintosh/.test(navigator.userAgent));
       })();
     </script>
     <style>
-      /* 冷启动兜底底色（与 src/index.css --background 一致），防 WKWebView 首帧白屏。 */
+      /* 冷启动兜底底色（与 src/index.css --bg 一致），防 WKWebView 首帧白屏。 */
       html,
       body {
         margin: 0;
-        background: #faf9f5;
+        background: #f7f6f2;
       }
       html.dark,
       html.dark body {
-        background: #1b1d21;
+        background: #0c0e10;
       }
     </style>
   </head>

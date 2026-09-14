@@ -1,5 +1,5 @@
 import { MODELS_SNAPSHOT } from "@/lib/modelsSnapshot";
-import type { Config } from "@/lib/ipc";
+import type { AppliedModel, AvailableModel, Config } from "@/lib/ipc";
 
 // ============================================================
 // 服务商预设与槽位常量 —— 数据自 v1 ui.html:272-360 平移，勿改。
@@ -16,10 +16,15 @@ export function claims1mItDoesNotHave(m: { to_1m: string; context_limit?: number
   return !!m.to_1m && m.context_limit !== undefined && m.context_limit < ONE_M_CONTEXT;
 }
 
-/** 上下文大小的人类可读写法：262144 → 256K。 */
+/**
+ * 上下文大小的人类可读写法。各家给的数有十进制也有二进制：
+ * 200000 → 200K、262144 → 256K、1000000 / 1048576 → 1M。
+ */
 export function formatContext(n?: number): string {
   if (!n) return "";
-  return n >= ONE_M_CONTEXT ? `${Math.round(n / 1024 / 1024)}M` : `${Math.round(n / 1024)}K`;
+  const base = n % 1000 === 0 ? 1000 : 1024;
+  if (n >= ONE_M_CONTEXT) return `${+(n / base / base).toFixed(1)}M`;
+  return `${Math.round(n / base)}K`;
 }
 
 /** §3.8：键 → 用户看得懂的能力名，用于「因版本过低不可用」提示。 */
@@ -153,13 +158,10 @@ export const PRESETS: Preset[] = [
   },
 ];
 
-/** 预设网格 tile 上的域名短标（design-proposal §03）。 */
+/** 预设网格格子上显示的域名（真实地址，两个百炼方案靠前缀区分）。 */
 export function presetHost(p: Preset): string {
   try {
-    const h = new URL(p.url).hostname;
-    if (p.id === "qwen-coding") return "dashscope";
-    if (p.id === "qwen-token") return "token-plan";
-    return h;
+    return new URL(p.url).hostname;
   } catch {
     return p.url;
   }
@@ -210,17 +212,22 @@ function modelsDevProviderId(url: string): string | undefined {
 }
 
 /**
- * 模型名补全的候选清单，三级兜底：
- * 1. 运行时从 models.dev 同步来的（最新，但首次打开 / 断网时没有）
- * 2. 发版时打包进来的快照（`npm run sync-models` 生成）
+ * 模型选择器的候选清单，三级兜底：
+ * 1. 运行时从 models.dev 同步来的（最新，带上下文上限；首次打开 / 断网时没有）
+ * 2. 发版时打包进来的快照（`npm run sync-models` 生成，只有模型名）
  * 3. 手写在预设里的那份（最后的兜底；会过期，实测 Kimi Code 那条落后过两代）
  */
-export function modelSuggestions(url: string, live: string[] | undefined): string[] {
-  if (live?.length) return live;
+export function modelOptions(
+  url: string,
+  live: AvailableModel[] | undefined,
+): { options: AvailableModel[]; source: "live" | "snapshot" | "preset" | "none" } {
+  if (live?.length) return { options: live, source: "live" };
   const pid = modelsDevProviderId(url);
   const snap = pid ? MODELS_SNAPSHOT[pid] : undefined;
-  if (snap?.length) return snap;
-  return getPresetModels(url);
+  if (snap?.length) return { options: snap.map((id) => ({ id, context: null })), source: "snapshot" };
+  const preset = getPresetModels(url);
+  if (preset.length) return { options: preset.map((id) => ({ id, context: null })), source: "preset" };
+  return { options: [], source: "none" };
 }
 
 export const THINKING_LABELS: Record<string, string> = {
@@ -306,33 +313,65 @@ export function flattenModels(config: Config): FlatModel[] {
 }
 
 /**
- * 这个服务商还需不需要「默认推理强度」下拉。
+ * 当前槽位映射和 Claude Desktop 实际写着的逐条比对。
  *
- * 换用 2.1 槽位池后，前 6 个槽位在 Claude Desktop 里有原生 5 档 / 4 档选择器，
- * 桌面端每次都会把选中的档位发过来，服务商级设置**完全不参与**（§3.10 透传优先）。
- * 只有落在没有选择器的槽位上的模型才够得着它：
- * `claude-sonnet-4-5` / `claude-haiku-4-5`（Vwt 里没有 effortLevels）
- * 以及 `claude-ml-*` 溢出层（连表都不在）。
- *
- * 留一个 90% 情况下不生效的下拉本身就是困惑源，所以按槽位隐藏。
+ * 比的是 Claude 那边看得见的东西：槽位、显示名、有没有 1M 变体。
+ * 密钥 / 地址这类改动代理立刻就用上了，不会让某个槽位「对不上」。
+ * 老版本写入的条目没有显示名，这时只比槽位和 1M —— 缺的字段不当作不一致。
  */
-export function providerNeedsEffortDefault(config: Config, providerIndex: number): boolean {
-  return flattenModels(config).some(
-    (m) => m.providerIndex === providerIndex && m.efforts.length === 0,
-  );
-}
-
-/** 模型行的槽位提示用「原始序号」（含未命名行，平移 v1 globalModelStart 行为）。 */
-export function rawSlotForModel(config: Config, pi: number, mi: number): string {
-  let idx = 0;
-  for (let i = 0; i < pi; i++) idx += config.providers[i]?.models.length ?? 0;
-  idx += mi;
-  return idx < MAX_MODELS ? slotId(idx) : "";
+export function diffApplied(
+  flat: FlatModel[],
+  applied: AppliedModel[],
+): { pending: Set<string>; removed: number } {
+  const bySlot = new Map(applied.map((a) => [a.slot, a]));
+  const pending = new Set<string>();
+  for (const row of flat) {
+    const a = bySlot.get(row.slot);
+    if (!a || a.supports_1m !== row.to1m || (a.label !== "" && a.label !== row.name)) {
+      pending.add(row.slot);
+    }
+  }
+  const current = new Set(flat.map((r) => r.slot));
+  const removed = applied.filter((a) => !current.has(a.slot)).length;
+  return { pending, removed };
 }
 
 /** 所有服务商模型总数（含未命名行，上限判定用，平移 v1 totalModels）。 */
 export function totalModelsRaw(config: Config): number {
   return config.providers.reduce((s, p) => s + p.models.length, 0);
+}
+
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前，一周以上写日期。 */
+export function formatSince(epochSecs?: string, nowMs = Date.now()): string | null {
+  const n = Number(epochSecs);
+  if (!epochSecs || !Number.isFinite(n) || n <= 0) return null;
+  const mins = Math.floor((nowMs / 1000 - n) / 60);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return `${mins} 分钟前`;
+  if (mins < 24 * 60) return `${Math.floor(mins / 60)} 小时前`;
+  if (mins < 7 * 24 * 60) return `${Math.floor(mins / 60 / 24)} 天前`;
+  const d = new Date(n * 1000);
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+/**
+ * 「应用」失败时后端给的是英文校验话术（与 v1 保持一致，回归套件按字节比对），
+ * 界面上换成用户看得懂的说法；认不出的原样显示。
+ */
+export function applyErrorText(message: string, config: Config | null): string {
+  const m = message.match(/^Provider (\d+) (.+)$/);
+  if (m) {
+    const i = Number(m[1]) - 1;
+    const who = `「${providerDisplayName(config?.providers[i]?.target_url ?? "", i)}」`;
+    const rest = m[2];
+    if (rest === "has no API URL.") return `${who}还没填 API 地址`;
+    if (rest.startsWith("URL must start with")) return `${who}的 API 地址要以 http:// 或 https:// 开头`;
+    if (rest === "has no API key.") return `${who}还没填 API 密钥`;
+    if (rest === "has no models.") return `${who}还没有模型`;
+    if (rest === "has a model with empty name.") return `${who}有一个模型没填名字`;
+  }
+  if (message === "Please add at least one provider.") return "还没有添加服务商";
+  return message;
 }
 
 /** 「上次应用」时间显示：今天 → 今天 HH:MM，否则 M月D日 HH:MM。 */

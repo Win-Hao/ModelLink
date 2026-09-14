@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { toast } from "sonner";
 
-import { Sidebar } from "@/components/Sidebar";
+import { ProviderPickerDialog } from "@/components/ProviderPickerDialog";
+import { TopBar } from "@/components/TopBar";
 import { UpdateModal } from "@/components/UpdateModal";
 import { LogsPage } from "@/components/pages/LogsPage";
 import { OverviewPage } from "@/components/pages/OverviewPage";
@@ -75,19 +76,18 @@ function Root() {
   return (
     <MotionConfig reducedMotion="user">
       <UpdaterCtx.Provider value={{ state: updater.state, manualCheck, checked }}>
-        <div className="relative flex h-screen overflow-hidden bg-background">
-          {/* macOS 拖拽区（红绿灯行高度）；Windows 有标准标题栏，此层无害 */}
-          <div data-tauri-drag-region className="absolute inset-x-0 top-0 z-40 h-11" />
-          <Sidebar />
-          <main className="relative flex min-w-0 flex-1 flex-col">
+        {/* 骨架（design-2.2.md §1）：顶栏 64px + 内容栏 964px 居中；窗口缩窄时两侧至少留 24px */}
+        <div className="flex h-screen flex-col overflow-hidden bg-bg">
+          <TopBar />
+          <main className="flex min-h-0 flex-1 flex-col px-6">
             <AnimatePresence mode="wait">
               <motion.div
                 key={page}
-                initial={{ opacity: 0, y: 6 }}
+                initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
+                exit={{ opacity: 0, y: 4 }}
                 transition={{ duration: 0.16, ease: "easeOut" }}
-                className="flex min-h-0 flex-1 flex-col"
+                className="mx-auto flex min-h-0 w-full max-w-[964px] flex-1 flex-col"
               >
                 {page === "overview" && <OverviewPage />}
                 {page === "providers" && <ProvidersPage />}
@@ -98,6 +98,7 @@ function Root() {
           </main>
         </div>
 
+        <ProviderPickerDialog />
         <UpdateModal
           open={updateOpen}
           state={updater.state}
@@ -105,7 +106,7 @@ function Root() {
           onLater={laterUpdate}
           onSkip={skipUpdate}
         />
-        <Toaster position="top-right" />
+        <Toaster position="bottom-right" />
       </UpdaterCtx.Provider>
     </MotionConfig>
   );

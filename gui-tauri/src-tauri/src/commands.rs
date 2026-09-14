@@ -9,7 +9,7 @@ use tauri::State;
 use crate::config::{canonical_hash, save_config_file, Config};
 use crate::gateway;
 use crate::models_dev;
-use crate::proxy::{LogEntry, ProxyState};
+use crate::proxy::{LogEntry, ProxyState, TodayStats};
 
 /// GUI 自身版本号（供前端设置页显示）。
 #[tauri::command]
@@ -262,6 +262,12 @@ pub fn available_models(state: State<'_, Arc<ProxyState>>, target_url: String) -
 #[tauri::command]
 pub fn get_logs(state: State<'_, Arc<ProxyState>>) -> Vec<LogEntry> {
     state.logs.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 日志页顶部摘要：今天的成功率 / 耗时 / token / 花费（不受「只留 100 条」限制）。
+#[tauri::command]
+pub fn get_log_stats(state: State<'_, Arc<ProxyState>>) -> TodayStats {
+    state.today_stats()
 }
 
 #[derive(Serialize)]

@@ -23,12 +23,13 @@ use axum::{
 use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::TcpListener;
 
 use crate::config::{
-    flatten_config, resolve_model, Config, ResolveError, ResolvedModel, HEARTBEAT_SECS,
+    flatten_config, resolve_model, Config, ModelPricing, ResolveError, ResolvedModel,
+    HEARTBEAT_SECS,
 };
 
 pub const MAX_LOGS: usize = 100;
@@ -36,17 +37,124 @@ pub const MAX_LOGS: usize = 100;
 /// 单请求最多整流次数（§3.11 通用约束，防循环）。同类整流每请求只做一次。
 pub(crate) const MAX_RECTIFY: usize = 2;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct LogEntry {
+    /// 2.2：自增编号。流式响应要等传完才知道耗时和用量，按它回填。
+    pub id: u64,
     pub time: String,
+    /// 2.2：Claude 请求的槽位名（原样，可能带 `[1m]`）。日志页据此找到对应的服务商。
+    pub slot: String,
     pub model: String,
     pub status: u16,
     /// 本次实际发给上游的推理强度（""=未发 / "off" / low…max）。
     pub thinking: String,
-    /// 2.1-A 附注：整流标记、未映射槽位等。多条以 " · " 连接，空 = 无附注。
+    /// 2.1-A 附注：整流标记、未映射槽位等。多条以 `NOTE_SEPARATOR` 连接，空 = 无附注。
     pub note: String,
     /// 2.1-A：ModelLink 自己判定为错误的请求（日志页标红）。
     pub error: bool,
+    /// 2.2：耗时（毫秒）：收到请求 → 响应传完。None = 还在传。
+    pub duration_ms: Option<u64>,
+    /// 2.2：上游 usage 里的 token 数。上游没给、或响应中途断开时为 None。
+    pub usage: Option<Usage>,
+    /// 2.2：按这个模型的费率算出的花费（USD）。没有费率或没有 usage 时为 None —— 绝不估算。
+    pub cost_usd: Option<f64>,
+    /// 2.2：出错时上游给的说明（`error.message`，截断）。
+    pub detail: String,
+}
+
+/// 2.2：上游 usage 里的 token 数（Anthropic 格式）。
+#[derive(Serialize, Clone, Copy, Default, Debug, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl Usage {
+    /// 并入一个 usage 对象，各项取大 —— 流式响应分几次给（message_start 给输入、
+    /// message_delta 给最终输出），数字只增不减；有的上游在 message_delta 里把输入写成 0。
+    /// 返回这个对象里有没有认得的字段。
+    pub(crate) fn merge(&mut self, v: &serde_json::Value) -> bool {
+        let mut seen = false;
+        let mut take = |key: &str, slot: &mut u64| {
+            if let Some(n) = v.get(key).and_then(|n| n.as_u64()) {
+                *slot = (*slot).max(n);
+                seen = true;
+            }
+        };
+        take("input_tokens", &mut self.input_tokens);
+        take("output_tokens", &mut self.output_tokens);
+        take("cache_read_input_tokens", &mut self.cache_read_tokens);
+        take("cache_creation_input_tokens", &mut self.cache_write_tokens);
+        seen
+    }
+
+    /// 按费率算花费（USD）。输入 / 输出价缺一个就不算 —— 那两个数编不得；
+    /// 缓存价没有按 0 计（与写进 Claude 的费率表同一口径，见 gateway::inference_model_pricing_entries）。
+    pub(crate) fn cost_usd(&self, p: &ModelPricing) -> Option<f64> {
+        let (input, output) = (p.input?, p.output?);
+        let per_token = |n: u64, price: f64| n as f64 * price / 1_000_000.0;
+        Some(
+            per_token(self.input_tokens, input)
+                + per_token(self.output_tokens, output)
+                + per_token(self.cache_read_tokens, p.cache_read.unwrap_or(0.0))
+                + per_token(self.cache_write_tokens, p.cache_write.unwrap_or(0.0)),
+        )
+    }
+}
+
+/// 2.2：今天的请求统计（日志页顶部摘要）。
+///
+/// 不从那 100 条日志里现算 —— 一个 Claude Code 会话就能刷掉几十条，
+/// 「今日」要是只算留下来的那部分，数字就是错的。
+#[derive(Serialize, Clone, Default, Debug, PartialEq)]
+pub struct TodayStats {
+    /// 从这个时刻起算（Unix 秒）：本地零点，或 ModelLink 今天启动的时刻，取晚的
+    pub since: u64,
+    /// 已经结束的请求数
+    pub requests: u64,
+    pub failures: u64,
+    pub duration_total_ms: u64,
+    pub duration_max_ms: u64,
+    /// 输入侧合计（含缓存命中与缓存写入）
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// 拿到 usage 的请求数；少于 requests 说明 token 合计不全
+    pub with_usage: u64,
+    pub cost_usd: f64,
+    /// 算得出花费的请求数；少于 with_usage 说明有模型没有费率，花费合计不能用
+    pub priced: u64,
+    #[serde(skip)]
+    day: i64,
+}
+
+impl TodayStats {
+    /// 换成 `now` 所在的那一天（跨零点时清零）。
+    fn roll(&mut self, now: u64, started_at: u64) {
+        let day = local_day(now);
+        if day != self.day {
+            *self = TodayStats { day, since: local_midnight(day).max(started_at), ..Default::default() };
+        }
+    }
+
+    fn record(&mut self, status: u16, error: bool, duration_ms: u64, usage: Option<Usage>, cost: Option<f64>) {
+        self.requests += 1;
+        if error || status >= 400 {
+            self.failures += 1;
+        }
+        self.duration_total_ms += duration_ms;
+        self.duration_max_ms = self.duration_max_ms.max(duration_ms);
+        if let Some(u) = usage {
+            self.with_usage += 1;
+            self.input_tokens += u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
+            self.output_tokens += u.output_tokens;
+            if let Some(c) = cost {
+                self.priced += 1;
+                self.cost_usd += c;
+            }
+        }
+    }
 }
 
 /// 服务商思考能力缓存（§3.11.4）。A 批只用到 `effort_supported`，
@@ -76,6 +184,12 @@ pub struct ProxyState {
     pub serve_handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// 上游思考能力缓存（§3.11.4），键 = (服务商 URL, 真实上游模型 ID)。
     pub caps: RwLock<HashMap<(String, String), ThinkingCaps>>,
+    /// 2.2：下一条日志的编号。
+    next_log_id: AtomicU64,
+    /// 2.2：今天的请求统计。
+    today: Mutex<TodayStats>,
+    /// 2.2：进程启动时刻（Unix 秒）—— 今天中途启动时，「今日」从这里算起。
+    started_at: u64,
 }
 
 impl ProxyState {
@@ -92,7 +206,50 @@ impl ProxyState {
             bound_port: AtomicU16::new(0),
             serve_handle: Mutex::new(None),
             caps: RwLock::new(HashMap::new()),
+            next_log_id: AtomicU64::new(1),
+            today: Mutex::new(TodayStats::default()),
+            started_at: unix_now(),
         })
+    }
+
+    /// 记一条日志，返回它的编号（流式响应传完后按编号回填）。
+    pub fn push_log(&self, mut entry: LogEntry) -> u64 {
+        entry.id = self.next_log_id.fetch_add(1, Ordering::SeqCst);
+        let id = entry.id;
+        let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+        logs.push(entry);
+        let len = logs.len();
+        if len > MAX_LOGS {
+            logs.drain(0..len - MAX_LOGS);
+        }
+        id
+    }
+
+    /// 请求结束：回填耗时 / 用量 / 花费 / 错误说明，并计入今日统计。
+    /// 日志条目可能已经被新请求挤出 100 条，统计照记。
+    pub fn finish_log(&self, id: u64, finished: Finished) {
+        let Finished { status, error, duration_ms, usage, cost_usd, detail } = finished;
+        {
+            let mut logs = self.logs.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(e) = logs.iter_mut().rev().find(|e| e.id == id) {
+                e.duration_ms = Some(duration_ms);
+                e.usage = usage;
+                e.cost_usd = cost_usd;
+                if !detail.is_empty() {
+                    e.detail = detail;
+                }
+            }
+        }
+        let mut today = self.today.lock().unwrap_or_else(|e| e.into_inner());
+        today.roll(unix_now(), self.started_at);
+        today.record(status, error, duration_ms, usage, cost_usd);
+    }
+
+    /// 今天的请求统计（没有请求时也会按日期翻篇）。
+    pub fn today_stats(&self) -> TodayStats {
+        let mut today = self.today.lock().unwrap_or_else(|e| e.into_inner());
+        today.roll(unix_now(), self.started_at);
+        today.clone()
     }
 
     /// 在已绑定的 listener 上启动 serve 任务并登记运行态（替换旧任务）。
@@ -153,27 +310,44 @@ impl ProxyState {
     }
 }
 
-pub fn chrono_now() -> String {
-    let d = std::time::SystemTime::now()
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let offset_secs: i64 = {
-        #[cfg(target_os = "macos")]
-        {
-            let mut now: libc::time_t = 0;
-            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-            unsafe {
-                libc::time(&mut now);
-                libc::localtime_r(&now, &mut tm);
-            }
-            tm.tm_gmtoff
+        .as_secs()
+}
+
+/// 本地时区相对 UTC 的偏移（秒）。非 macOS 沿用 v1 的固定东八区。
+fn local_offset_secs() -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        let mut now: libc::time_t = 0;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::time(&mut now);
+            libc::localtime_r(&now, &mut tm);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            8 * 3600
-        }
-    };
+        tm.tm_gmtoff
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        8 * 3600
+    }
+}
+
+/// 本地日期序号（自 1970-01-01 起的第几天，按本地时区）。
+fn local_day(ts: u64) -> i64 {
+    (ts as i64 + local_offset_secs()).div_euclid(86400)
+}
+
+/// 某个本地日期序号的零点（Unix 秒）。
+fn local_midnight(day: i64) -> u64 {
+    (day * 86400 - local_offset_secs()).max(0) as u64
+}
+
+pub fn chrono_now() -> String {
+    let d = unix_now();
+    let offset_secs = local_offset_secs();
     let local = (d as i64 + offset_secs) as u64;
     let h = (local % 86400) / 3600;
     let m = (local % 3600) / 60;
@@ -322,6 +496,167 @@ pub(crate) fn prepare_thinking(
     (tag, optimized)
 }
 
+/// 一条日志有多个标记时用它连接。标记文字里自带「 · 」（如「已整流 · 思考预算过小」），不能拿它当分隔。
+const NOTE_SEPARATOR: &str = "；";
+
+/// 日志标记：上游不认 `output_config.effort`。现场整流成功、和能力缓存命中直接不发，用的是同一句。
+const NOTE_EFFORT: &str = "已整流 · 上游不认推理档位";
+/// 日志标记：上游收不了历史 thinking 块（同上，两条路径同一句）。
+const NOTE_THINKING_BLOCKS: &str = "已整流 · 上游不认思考块签名";
+
+/// 日志里「上游的错误说明」最多留多少字 —— 够看懂，又不至于把整页撑爆。
+const DETAIL_MAX_CHARS: usize = 300;
+
+fn truncate_detail(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= DETAIL_MAX_CHARS {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(DETAIL_MAX_CHARS).collect::<String>())
+    }
+}
+
+/// 请求结束时回填日志的内容。
+pub struct Finished {
+    pub status: u16,
+    pub error: bool,
+    pub duration_ms: u64,
+    pub usage: Option<Usage>,
+    pub cost_usd: Option<f64>,
+    pub detail: String,
+}
+
+/// 响应体旁路扫描：一个字节都不改，只从里面找 usage 和错误说明（§6.3 日志的耗时 / token / 花费）。
+///
+/// SSE 按行扫 `data:`；普通 JSON 响应攒起来等结束时解析（有上限，超了就不算用量）。
+pub(crate) struct ResponseScan {
+    sse: bool,
+    /// 普通 JSON 响应超过上限：不再攒，也不给 usage
+    overflowed: bool,
+    buf: Vec<u8>,
+    usage: Usage,
+    saw_usage: bool,
+    /// SSE 看到了 message_stop / JSON 完整解析 —— 没走完的响应不给 usage，半截的 token 数会让花费偏低
+    complete: bool,
+    detail: String,
+}
+
+/// 普通 JSON 响应最多攒这么多字节来找 usage。
+const SCAN_JSON_LIMIT: usize = 8 * 1024 * 1024;
+/// SSE 单行最长留这么多（正常的事件行远小于它）。
+const SCAN_LINE_LIMIT: usize = 1024 * 1024;
+
+impl ResponseScan {
+    pub(crate) fn new(sse: bool) -> Self {
+        Self {
+            sse,
+            overflowed: false,
+            buf: Vec::new(),
+            usage: Usage::default(),
+            saw_usage: false,
+            complete: false,
+            detail: String::new(),
+        }
+    }
+
+    pub(crate) fn feed(&mut self, chunk: &[u8]) {
+        if !self.sse {
+            if self.overflowed {
+                return;
+            }
+            if self.buf.len() + chunk.len() <= SCAN_JSON_LIMIT {
+                self.buf.extend_from_slice(chunk);
+            } else {
+                self.overflowed = true;
+                self.buf = Vec::new();
+            }
+            return;
+        }
+        self.buf.extend_from_slice(chunk);
+        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            self.scan_line(&line);
+        }
+        if self.buf.len() > SCAN_LINE_LIMIT {
+            self.buf.clear();
+        }
+    }
+
+    fn scan_line(&mut self, line: &[u8]) {
+        let Some(rest) = line.strip_prefix(b"data:") else { return };
+        // 内容增量占了绝大多数行，先按字节粗筛，省得每行都解析一遍 JSON
+        let wanted = [&b"usage"[..], b"message_stop", b"error"];
+        if !wanted.iter().any(|w| rest.windows(w.len()).any(|win| win == *w)) {
+            return;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(rest.trim_ascii()) else { return };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("message_start") => {
+                if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                    self.saw_usage |= self.usage.merge(u);
+                }
+            }
+            Some("message_delta") => {
+                if let Some(u) = v.get("usage") {
+                    self.saw_usage |= self.usage.merge(u);
+                }
+            }
+            Some("message_stop") => self.complete = true,
+            Some("error") => {
+                if let Some(m) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+                    self.detail = truncate_detail(m);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 收尾：返回（usage，错误说明）。
+    pub(crate) fn finish(&mut self, status: u16) -> (Option<Usage>, String) {
+        if !self.sse && !self.buf.is_empty() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&self.buf) {
+                self.complete = true;
+                if let Some(u) = v.get("usage") {
+                    self.saw_usage |= self.usage.merge(u);
+                }
+            }
+            if status >= 400 {
+                self.detail = truncate_detail(&upstream_error_message(&self.buf));
+            }
+        }
+        let usage = (self.complete && self.saw_usage).then_some(self.usage);
+        (usage, std::mem::take(&mut self.detail))
+    }
+}
+
+/// 挂在转发流上：流传完（或下游中途断开、流被丢弃）时回填这条日志。
+pub(crate) struct LogFinisher {
+    pub(crate) state: Arc<ProxyState>,
+    pub(crate) id: u64,
+    pub(crate) status: u16,
+    pub(crate) started: std::time::Instant,
+    pub(crate) pricing: Option<ModelPricing>,
+    pub(crate) scan: ResponseScan,
+}
+
+impl Drop for LogFinisher {
+    fn drop(&mut self) {
+        let (usage, detail) = self.scan.finish(self.status);
+        let cost_usd = usage.and_then(|u| self.pricing.as_ref().and_then(|p| u.cost_usd(p)));
+        self.state.finish_log(
+            self.id,
+            Finished {
+                status: self.status,
+                error: false,
+                duration_ms: self.started.elapsed().as_millis() as u64,
+                usage,
+                cost_usd,
+                detail,
+            },
+        );
+    }
+}
+
 /// 整流器种类（§3.11）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Rectifier {
@@ -334,12 +669,12 @@ pub(crate) enum Rectifier {
 }
 
 impl Rectifier {
-    /// 整流成功后写进请求日志的标记。
+    /// 整流成功后写进请求日志的标记（日志页原样显示，写给用户看）。
     pub(crate) fn success_note(self) -> &'static str {
         match self {
-            Rectifier::Effort => "已自动修复：effort 不支持",
-            Rectifier::ThinkingBudget => "已自动修复：thinking budget 下限",
-            Rectifier::ThinkingBlocks => "已自动修复：thinking 块签名",
+            Rectifier::Effort => NOTE_EFFORT,
+            Rectifier::ThinkingBudget => "已整流 · 思考预算过小",
+            Rectifier::ThinkingBlocks => NOTE_THINKING_BLOCKS,
         }
     }
 
@@ -355,9 +690,9 @@ impl Rectifier {
     /// 整流没救回来时写进日志的标记。
     pub(crate) fn failed_note(self) -> &'static str {
         match self {
-            Rectifier::Effort => "自动修复未生效：effort",
-            Rectifier::ThinkingBudget => "自动修复未生效：budget",
-            Rectifier::ThinkingBlocks => "自动修复未生效：thinking 块",
+            Rectifier::Effort => "整流未生效 · 推理档位",
+            Rectifier::ThinkingBudget => "整流未生效 · 思考预算",
+            Rectifier::ThinkingBlocks => "整流未生效 · 思考块签名",
         }
     }
 }
@@ -643,19 +978,13 @@ fn passthrough_headers(src: &reqwest::header::HeaderMap) -> HeaderMap {
     headers
 }
 
-fn push_log(state: &ProxyState, entry: LogEntry) {
-    let mut logs = state.logs.write().unwrap_or_else(|e| e.into_inner());
-    logs.push(entry);
-    let len = logs.len();
-    if len > MAX_LOGS {
-        logs.drain(0..len - MAX_LOGS);
-    }
-}
-
 async fn proxy_fallback(
     State(state): State<Arc<ProxyState>>,
     req: axum::http::Request<Body>,
 ) -> axum::response::Response {
+    use tokio_stream::StreamExt as _;
+
+    let started = std::time::Instant::now();
     let (parts, body) = req.into_parts();
 
     if parts.method == Method::GET && parts.uri.path().contains("/v1/models") {
@@ -679,6 +1008,9 @@ async fn proxy_fallback(
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
+    // Claude 请求的槽位名，原样记进日志（`data["model"]` 马上会被换成上游模型名）
+    let requested = data.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+
     let resolved = match data.get("model").and_then(|m| m.as_str()) {
         Some(model) => match resolve_model(model, &config) {
             Ok(r) => {
@@ -694,15 +1026,24 @@ async fn proxy_fallback(
             // §3.3：宁可报错也不静默换一个模型给用户
             Err(ResolveError::UnmappedSlot(slot)) => {
                 eprintln!("  error: 槽位 {} 未映射到任何服务商", slot);
-                push_log(
-                    state.as_ref(),
-                    LogEntry {
-                        time: chrono_now(),
-                        model: model.to_string(),
+                let id = state.push_log(LogEntry {
+                    time: chrono_now(),
+                    slot: model.to_string(),
+                    model: model.to_string(),
+                    status: 400,
+                    note: "未映射槽位".to_string(),
+                    error: true,
+                    ..Default::default()
+                });
+                state.finish_log(
+                    id,
+                    Finished {
                         status: 400,
-                        thinking: String::new(),
-                        note: "未映射槽位".to_string(),
                         error: true,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        usage: None,
+                        cost_usd: None,
+                        detail: String::new(),
                     },
                 );
                 return (StatusCode::BAD_REQUEST, Json(unmapped_slot_body(&slot))).into_response();
@@ -717,11 +1058,35 @@ async fn proxy_fallback(
     let mut notes: Vec<&'static str> = Vec::new();
     if title_optimized {
         eprintln!("  标题生成：已降到 effort=low + thinking disabled");
-        notes.push("已优化：标题生成");
+        notes.push("标题生成 · 已省思考");
     }
 
     if resolved.target_url.is_empty() {
         eprintln!("  error: no target URL configured for this model");
+        // 请求里连模型名都没有的（不是 Claude 发的）不记，免得日志里出现一条没头没尾的错误
+        if !requested.is_empty() {
+            let id = state.push_log(LogEntry {
+                time: chrono_now(),
+                slot: requested.clone(),
+                model: resolved.model.clone(),
+                status: 502,
+                thinking: thinking_log.clone(),
+                note: "服务商没填 API 地址".to_string(),
+                error: true,
+                ..Default::default()
+            });
+            state.finish_log(
+                id,
+                Finished {
+                    status: 502,
+                    error: true,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    usage: None,
+                    cost_usd: None,
+                    detail: String::new(),
+                },
+            );
+        }
         return (StatusCode::BAD_GATEWAY, "No API URL configured for this model. Please configure the provider in the proxy app.").into_response();
     }
 
@@ -731,14 +1096,14 @@ async fn proxy_fallback(
         && strip_output_config(&mut data)
     {
         eprintln!("  effort: 上游已知不支持，本次不发送");
-        notes.push("effort 不支持（已缓存）");
+        notes.push(NOTE_EFFORT);
         thinking_log = String::new();
     }
     if state.thinking_blocks_rejected(&resolved.target_url, &resolved.model) {
         let st = strip_thinking_blocks(&mut data);
         if !st.is_empty() {
             eprintln!("  thinking 块: 上游已知不接受，本次先剥掉 {} 块", st.thinking + st.redacted);
-            notes.push("thinking 块不支持（已缓存）");
+            notes.push(NOTE_THINKING_BLOCKS);
         }
     }
 
@@ -781,6 +1146,29 @@ async fn proxy_fallback(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  proxy error: {}", e);
+                let mut note = notes.clone();
+                note.push("连不上服务商");
+                let id = state.push_log(LogEntry {
+                    time: chrono_now(),
+                    slot: requested.clone(),
+                    model: data.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    status: 502,
+                    thinking: thinking_log.clone(),
+                    note: note.join(NOTE_SEPARATOR),
+                    error: true,
+                    ..Default::default()
+                });
+                state.finish_log(
+                    id,
+                    Finished {
+                        status: 502,
+                        error: true,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        usage: None,
+                        cost_usd: None,
+                        detail: truncate_detail(&e.to_string()),
+                    },
+                );
                 return (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response();
             }
         };
@@ -804,30 +1192,49 @@ async fn proxy_fallback(
                     notes.push(r.success_note());
                 } else {
                     // 5xx：换了个失败方式，不足以断定上游不支持 —— 不写缓存，但要留痕
-                    notes.push("已尝试自动修复");
+                    notes.push("整流后上游仍出错");
                 }
             }
             let status =
                 StatusCode::from_u16(raw_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let headers = passthrough_headers(resp.headers());
-            if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
-                push_log(
-                    state.as_ref(),
-                    LogEntry {
-                        time: chrono_now(),
-                        model: model.to_string(),
-                        status: raw_status,
-                        thinking: thinking_log.clone(),
-                        note: notes.join(" · "),
-                        error: false,
-                    },
-                );
-            }
+            let sse = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("text/event-stream"));
+            let log_id = data.get("model").and_then(|m| m.as_str()).map(|model| {
+                state.push_log(LogEntry {
+                    time: chrono_now(),
+                    slot: requested.clone(),
+                    model: model.to_string(),
+                    status: raw_status,
+                    thinking: thinking_log.clone(),
+                    note: notes.join(NOTE_SEPARATOR),
+                    error: false,
+                    ..Default::default()
+                })
+            });
+            // 旁路扫描响应里的 usage（一个字节都不改），流传完或下游断开时回填日志。
             // §3.2：流式响应插 SSE 心跳，非流式保持原样直通（红线：字节等价）
+            let mut finisher = log_id.map(|id| LogFinisher {
+                state: state.clone(),
+                id,
+                status: raw_status,
+                started,
+                pricing: resolved.pricing.clone(),
+                scan: ResponseScan::new(sse),
+            });
+            let upstream = resp.bytes_stream().map(move |item| {
+                if let (Some(f), Ok(chunk)) = (finisher.as_mut(), &item) {
+                    f.scan.feed(chunk);
+                }
+                item
+            });
             let body = if streaming {
-                Body::from_stream(with_heartbeat(resp.bytes_stream(), HEARTBEAT_SECS))
+                Body::from_stream(with_heartbeat(upstream, HEARTBEAT_SECS))
             } else {
-                Body::from_stream(resp.bytes_stream())
+                Body::from_stream(upstream)
             };
             return (status, headers, body).into_response();
         }
@@ -886,15 +1293,25 @@ async fn proxy_fallback(
 
     let status = StatusCode::from_u16(raw_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if let Some(model) = data.get("model").and_then(|m| m.as_str()) {
-        push_log(
-            state.as_ref(),
-            LogEntry {
-                time: chrono_now(),
-                model: model.to_string(),
+        let id = state.push_log(LogEntry {
+            time: chrono_now(),
+            slot: requested.clone(),
+            model: model.to_string(),
+            status: raw_status,
+            thinking: thinking_log.clone(),
+            note: notes.join(NOTE_SEPARATOR),
+            error: false,
+            ..Default::default()
+        });
+        state.finish_log(
+            id,
+            Finished {
                 status: raw_status,
-                thinking: thinking_log.clone(),
-                note: notes.join(" · "),
                 error: false,
+                duration_ms: started.elapsed().as_millis() as u64,
+                usage: None,
+                cost_usd: None,
+                detail: truncate_detail(&upstream_error_message(&err_body)),
             },
         );
     }
@@ -1515,6 +1932,287 @@ mod tests {
     }
 
     // ---- §3.11.4 能力缓存（按服务商 + 真实上游模型 ID，绝不按槽位名） ----
+
+    // ---- 2.2 请求日志：耗时 / token / 花费 ----
+
+    #[test]
+    fn usage_merge_keeps_the_larger_number_per_field() {
+        // 流式响应分两次给：message_start 给输入，message_delta 给最终输出（有的上游把输入写成 0）
+        let mut u = Usage::default();
+        assert!(u.merge(&serde_json::json!({
+            "input_tokens": 1200, "output_tokens": 1,
+            "cache_read_input_tokens": 300, "cache_creation_input_tokens": 40
+        })));
+        assert!(u.merge(&serde_json::json!({"input_tokens": 0, "output_tokens": 856})));
+        assert_eq!(u, Usage { input_tokens: 1200, output_tokens: 856, cache_read_tokens: 300, cache_write_tokens: 40 });
+        assert!(!u.merge(&serde_json::json!({"something": 1})), "认不出的对象不算有 usage");
+    }
+
+    #[test]
+    fn cost_needs_both_input_and_output_prices() {
+        let u = Usage { input_tokens: 1_000_000, output_tokens: 500_000, cache_read_tokens: 2_000_000, cache_write_tokens: 0 };
+        let full = ModelPricing { input: Some(0.5), output: Some(2.0), cache_read: Some(0.1), cache_write: None };
+        // 0.5 + 1.0 + 0.2；缓存写入没有价按 0
+        assert!((u.cost_usd(&full).unwrap() - 1.7).abs() < 1e-9);
+        // 缺输出价就不算 —— 宁可不显示，也不给假账单
+        let half = ModelPricing { input: Some(0.5), ..Default::default() };
+        assert_eq!(u.cost_usd(&half), None);
+    }
+
+    fn sse(events: &[serde_json::Value]) -> String {
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
+            .collect()
+    }
+
+    #[test]
+    fn sse_scan_finds_usage_even_when_split_mid_line() {
+        let body = sse(&[
+            serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 12, "cache_read_input_tokens": 5, "output_tokens": 1}}}),
+            serde_json::json!({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hello usage"}}),
+            serde_json::json!({"type": "message_delta", "usage": {"output_tokens": 34}}),
+            serde_json::json!({"type": "message_stop"}),
+        ]);
+        // 按 7 字节切，保证每行都被切断过
+        let mut scan = ResponseScan::new(true);
+        for chunk in body.as_bytes().chunks(7) {
+            scan.feed(chunk);
+        }
+        let (usage, detail) = scan.finish(200);
+        assert_eq!(usage, Some(Usage { input_tokens: 12, output_tokens: 34, cache_read_tokens: 5, cache_write_tokens: 0 }));
+        assert_eq!(detail, "");
+    }
+
+    #[test]
+    fn interrupted_stream_reports_no_usage() {
+        // 用户在 Claude 里点了停止：没有 message_stop，输出 token 数不全 —— 不给数，免得花费偏低
+        let body = sse(&[
+            serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+        ]);
+        let mut scan = ResponseScan::new(true);
+        scan.feed(body.as_bytes());
+        assert_eq!(scan.finish(200).0, None);
+    }
+
+    #[test]
+    fn sse_error_event_becomes_the_detail() {
+        let body = sse(&[serde_json::json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})]);
+        let mut scan = ResponseScan::new(true);
+        scan.feed(body.as_bytes());
+        assert_eq!(scan.finish(200).1, "Overloaded");
+    }
+
+    #[test]
+    fn json_scan_reads_usage_and_error_message() {
+        let ok = br#"{"type":"message","content":[],"usage":{"input_tokens":7,"output_tokens":3}}"#;
+        let mut scan = ResponseScan::new(false);
+        scan.feed(&ok[..10]);
+        scan.feed(&ok[10..]);
+        assert_eq!(scan.finish(200).0, Some(Usage { input_tokens: 7, output_tokens: 3, ..Default::default() }));
+
+        let err = br#"{"type":"error","error":{"type":"api_error","message":"upstream exploded"}}"#;
+        let mut scan = ResponseScan::new(false);
+        scan.feed(err);
+        assert_eq!(scan.finish(503), (None, "upstream exploded".to_string()));
+    }
+
+    #[test]
+    fn oversized_json_response_is_not_scanned() {
+        let mut scan = ResponseScan::new(false);
+        scan.feed(br#"{"usage":{"input_tokens":1,"output_tokens":1},"pad":""#);
+        scan.feed(&vec![b'x'; SCAN_JSON_LIMIT]);
+        scan.feed(br#""}"#);
+        assert_eq!(scan.finish(200).0, None);
+    }
+
+    #[test]
+    fn today_stats_count_everything_and_roll_over_at_midnight() {
+        let now = 1_800_000_000u64;
+        let mut t = TodayStats::default();
+        t.roll(now, 0);
+        let u = Usage { input_tokens: 100, output_tokens: 20, cache_read_tokens: 50, cache_write_tokens: 0 };
+        t.record(200, false, 1200, Some(u), Some(0.01));
+        t.record(200, false, 3000, Some(u), None); // 这个模型没费率
+        t.record(502, true, 40, None, None);
+        assert_eq!((t.requests, t.failures, t.with_usage, t.priced), (3, 1, 2, 1));
+        assert_eq!((t.input_tokens, t.output_tokens), (300, 40), "输入侧含缓存命中");
+        assert_eq!((t.duration_total_ms, t.duration_max_ms), (4240, 3000));
+        assert!(t.since <= now);
+
+        t.roll(now + 60, 0);
+        assert_eq!(t.requests, 3, "同一天不清零");
+        t.roll(now + 86_400, 0);
+        assert_eq!(t.requests, 0, "跨天清零");
+        // ModelLink 今天中途才启动：从启动时刻算起
+        let mut t = TodayStats::default();
+        t.roll(now, now - 5);
+        assert_eq!(t.since, now - 5);
+    }
+
+    #[test]
+    fn finish_log_fills_the_entry_and_counts_even_after_eviction() {
+        let state = ProxyState::new(Config::default()).unwrap();
+        let done = |status| Finished {
+            status,
+            error: false,
+            duration_ms: 900,
+            usage: Some(Usage { input_tokens: 10, output_tokens: 2, ..Default::default() }),
+            cost_usd: Some(0.5),
+            detail: String::new(),
+        };
+        let first = state.push_log(LogEntry { model: "m".into(), status: 200, ..Default::default() });
+        {
+            let logs = state.logs.read().unwrap();
+            assert_eq!(logs[0].duration_ms, None, "传完之前没有耗时");
+            assert_eq!(logs[0].id, first);
+        }
+        state.finish_log(first, done(200));
+        assert_eq!(state.logs.read().unwrap()[0].duration_ms, Some(900));
+        assert_eq!(state.logs.read().unwrap()[0].cost_usd, Some(0.5));
+
+        // 一个长请求还没传完，期间来了 100 条新请求把它挤出去 —— 统计照记
+        let long = state.push_log(LogEntry { model: "long".into(), status: 200, ..Default::default() });
+        for _ in 0..MAX_LOGS {
+            state.push_log(LogEntry::default());
+        }
+        state.finish_log(long, done(200));
+        assert!(state.logs.read().unwrap().iter().all(|e| e.id != long));
+        assert_eq!(state.today_stats().requests, 2);
+    }
+
+    /// 起一个假上游 + 一个真代理，返回（代理状态，代理地址）。
+    async fn proxy_with_upstream(upstream: Router, pricing: Option<ModelPricing>) -> (Arc<ProxyState>, String) {
+        let ul = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_url = format!("http://{}", ul.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(ul, upstream).await.unwrap() });
+        let cfg = Config {
+            providers: vec![Provider {
+                target_url: upstream_url,
+                api_key: "k".into(),
+                models: vec![ModelEntry { name: "real-model".into(), pricing_synced: pricing, ..Default::default() }],
+                thinking_effort: String::new(),
+            }],
+            ..Default::default()
+        };
+        let state = Arc::new(no_proxy_state(cfg));
+        let pl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", pl.local_addr().unwrap());
+        tokio::spawn(serve(pl, state.clone()));
+        (state, addr)
+    }
+
+    /// 本机挂着系统 HTTP 代理时，reqwest 连 127.0.0.1 也会绕过去（连不上变成代理回的 502）——
+    /// 测试里一律直连，结果才不随机器环境变。
+    fn no_proxy_state(cfg: Config) -> ProxyState {
+        let mut st = ProxyState::new(cfg).unwrap();
+        st.client = Client::builder().no_proxy().build().unwrap();
+        st
+    }
+
+    fn direct() -> Client {
+        Client::builder().no_proxy().build().unwrap()
+    }
+
+    /// 流传完之后日志才回填，等它一下。
+    async fn settled_log(state: &ProxyState) -> LogEntry {
+        for _ in 0..100 {
+            if let Some(e) = state.logs.read().unwrap().last().filter(|e| e.duration_ms.is_some()) {
+                return e.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("日志一直没有回填");
+    }
+
+    const SSE_BODY: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"output_tokens\":1}}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":500}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    #[tokio::test]
+    async fn streamed_response_is_untouched_and_the_log_gets_usage_and_cost() {
+        let upstream = Router::new().fallback(|| async { ([("content-type", "text/event-stream")], SSE_BODY) });
+        let pricing = ModelPricing { input: Some(2.0), output: Some(8.0), ..Default::default() };
+        let (state, addr) = proxy_with_upstream(upstream, Some(pricing)).await;
+
+        let body = direct()
+            .post(format!("{addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"model": "claude-opus-5", "stream": true, "max_tokens": 5,
+                                      "messages": [{"role": "user", "content": "hi"}]}).to_string())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, SSE_BODY, "旁路扫描不许改响应的任何一个字节");
+
+        let e = settled_log(&state).await;
+        assert_eq!((e.slot.as_str(), e.model.as_str(), e.status), ("claude-opus-5", "real-model", 200));
+        assert_eq!(e.usage, Some(Usage { input_tokens: 1000, output_tokens: 500, ..Default::default() }));
+        assert!((e.cost_usd.unwrap() - 0.006).abs() < 1e-12, "1000×2 + 500×8 每百万 token");
+        let today = state.today_stats();
+        assert_eq!((today.requests, today.with_usage, today.priced), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn without_a_price_the_log_has_tokens_but_no_cost() {
+        let upstream = Router::new().fallback(|| async {
+            ([("content-type", "application/json")], r#"{"type":"message","usage":{"input_tokens":3,"output_tokens":4}}"#)
+        });
+        let (state, addr) = proxy_with_upstream(upstream, None).await;
+        direct()
+            .post(format!("{addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"model": "claude-opus-5", "max_tokens": 5, "messages": []}).to_string())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let e = settled_log(&state).await;
+        assert_eq!(e.usage, Some(Usage { input_tokens: 3, output_tokens: 4, ..Default::default() }));
+        assert_eq!(e.cost_usd, None, "没费率就不算 —— 绝不估算");
+        assert_eq!(state.today_stats().priced, 0);
+    }
+
+    #[tokio::test]
+    async fn unreachable_upstream_is_logged_instead_of_vanishing() {
+        // 以前这条 502 不进日志：Claude 里报错，ModelLink 的日志页却一片空白
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_url = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let cfg = Config {
+            providers: vec![Provider {
+                target_url: dead_url,
+                api_key: "k".into(),
+                models: vec![ModelEntry { name: "real-model".into(), ..Default::default() }],
+                thinking_effort: String::new(),
+            }],
+            ..Default::default()
+        };
+        let state = Arc::new(no_proxy_state(cfg));
+        let pl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", pl.local_addr().unwrap());
+        tokio::spawn(serve(pl, state.clone()));
+
+        let resp = direct()
+            .post(format!("{addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"model": "claude-opus-5", "max_tokens": 5, "messages": []}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 502);
+        assert!(resp.text().await.unwrap().starts_with("Proxy error: "), "响应话术不变");
+        let e = settled_log(&state).await;
+        assert_eq!((e.status, e.error, e.note.as_str()), (502, true, "连不上服务商"));
+        assert!(!e.detail.is_empty());
+        assert_eq!(state.today_stats().failures, 1);
+    }
 
     #[test]
     fn caps_cache_treats_the_1m_variant_as_the_same_model() {

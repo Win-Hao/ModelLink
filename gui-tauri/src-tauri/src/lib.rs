@@ -196,6 +196,7 @@ pub fn run() {
             commands::test_provider,
             commands::apply_to_claude,
             commands::get_logs,
+            commands::get_log_stats,
             commands::proxy_status,
             commands::set_port,
             commands::sync_pricing,

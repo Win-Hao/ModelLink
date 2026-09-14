@@ -321,6 +321,8 @@ pub struct ResolvedModel {
     pub target_url: String,
     pub api_key: String,
     pub thinking_effort: String,
+    /// 2.2：这个模型的费率，请求日志据此算花费。不参与转发。
+    pub pricing: Option<ModelPricing>,
 }
 
 /// 槽位解析失败（§3.3）。
@@ -398,6 +400,7 @@ pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, Reso
                 target_url: e.url.clone(),
                 api_key: e.key.clone(),
                 thinking_effort: e.thinking_effort.clone(),
+                pricing: e.pricing.clone(),
             });
         }
     }

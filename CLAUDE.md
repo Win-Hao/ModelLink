@@ -139,6 +139,8 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
   `models_dev_models` / `last_applied_*`）。否则前端一份旧草稿保存下去就会抹掉后台同步的结果。
   这类字段进 `canonical_hash`，所以 dirty 判定必须用**后端返回的那份**配置算，用草稿算必然出错。
 - **`[1m]` 后缀永远不会到代理**：引擎会剥掉它、改发 `anthropic-beta: context-1m-2025-08-07` 头。
+- **本机挂着系统 HTTP 代理时，reqwest 连 127.0.0.1 也会走代理**（macOS 代理例外列表不生效）：
+  连不上的端口会变成代理回的 502。起假上游的 Rust 测试一律 `Client::builder().no_proxy()`。
 - **Chat 模式的系统提示词里没有当前模型 ID**：只在 `organizationInstructions` 里列全部
   「代号 = 模型」，模型不知道自己是哪一条，映射一多就猜错。代理转发时按请求把那段说明换成
   这一次的真实模型（`identity.rs`），并要求模型别把代号、槽位这些内部细节说给用户听。

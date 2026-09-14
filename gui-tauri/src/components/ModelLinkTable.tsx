@@ -97,7 +97,7 @@ export function ModelLinkTable() {
                   key={flashNonce}
                   aria-hidden
                   className="pointer-events-none absolute inset-0"
-                  style={{ background: dark ? "rgba(102,192,147,.14)" : "rgba(38,128,95,.1)" }}
+                  style={{ background: dark ? "rgba(102,192,147,.14)" : "rgba(35,119,88,.1)" }}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: [0, 1, 0] }}
                   transition={{ duration: 0.3, delay: i * 0.06 }}

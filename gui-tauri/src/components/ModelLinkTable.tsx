@@ -97,7 +97,7 @@ export function ModelLinkTable() {
                   key={flashNonce}
                   aria-hidden
                   className="pointer-events-none absolute inset-0"
-                  style={{ background: dark ? "rgba(82,179,139,.14)" : "rgba(38,128,95,.1)" }}
+                  style={{ background: dark ? "rgba(102,192,147,.14)" : "rgba(38,128,95,.1)" }}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: [0, 1, 0] }}
                   transition={{ duration: 0.3, delay: i * 0.06 }}
@@ -106,7 +106,7 @@ export function ModelLinkTable() {
               <span className={cn(COL.slot, "mono truncate text-[12.5px]", pending ? "text-fg3" : "text-fg2")}>
                 {row.slot}
               </span>
-              <span className={cn(COL.arrow, "text-hair2 dark:text-[#3c444b]")}>
+              <span className={cn(COL.arrow, "text-hair2 dark:text-white/15")}>
                 <LinkArrow dashed={pending} />
               </span>
               <span className={COL.model}>

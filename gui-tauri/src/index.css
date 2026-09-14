@@ -44,33 +44,41 @@
   --fg3: #87817a; /* 列头、说明 */
   --accent: #b8532f; /* 陶土红 */
   --accent-weak: rgba(184, 83, 47, 0.09);
-  --on-accent: #ffffff; /* 强调色按钮上的字 */
+  /* 实心色块（主按钮、开关）的底色，上面压白字 / 白色圆钮。亮色下陶土红本身压白字就够清楚 */
+  --accent-fill: var(--accent);
+  --on-accent: #ffffff; /* 实心色块上的字 */
   --ok: #26805f; /* 正常、已生效、已连通 */
   --danger: #b3382f; /* 错误、删除 */
+  --danger-fill: var(--danger); /* 确认删除按钮的底色 */
 
   /* 阴影只有中性的，不许彩色辉光 */
   --shadow: 0 1px 2px rgba(32, 28, 24, 0.05), 0 0 0 1px var(--hair);
   --float: 0 6px 24px rgba(32, 28, 24, 0.14), 0 0 0 1px var(--hair2); /* 下拉、弹窗、toast */
 }
 
+/* 深色：石墨黑（近中性、极轻的暖，不带蓝调）+ 与应用图标同一家族的陶土色。
+   陶土色在深底上要分两档：文字 / 描边用亮的一档才读得清，实心色块用深的一档白字才压得住。 */
 .dark {
   color-scheme: dark;
-  --bg: #0c0e10;
-  --panel: #14171a;
-  --sunken: #101315;
-  --hair: rgba(255, 255, 255, 0.065);
+  --bg: #0d0c0b;
+  --panel: #161514;
+  --sunken: #111110;
+  --hair: rgba(255, 255, 255, 0.07);
   --hair2: rgba(255, 255, 255, 0.12);
-  --fg: #eceef0;
-  --fg2: #9aa2a9;
-  --fg3: #7d858d;
-  --accent: #e0b177; /* 暖沙，不是陶土红 —— 陶土红在深色底上发闷 */
-  --accent-weak: rgba(224, 177, 119, 0.11);
-  --on-accent: #191410;
-  --ok: #52b38b;
-  --danger: #e07b72;
+  --fg: #efedec;
+  --fg2: #a9a7a4;
+  --fg3: #8e8c89;
+  --accent: #df825f; /* 文字、描边、选中框：面板上 6.5:1 */
+  --accent-weak: rgba(223, 130, 95, 0.12);
+  --accent-fill: #be573b; /* 白字 4.5:1 */
+  --on-accent: #ffffff;
+  --ok: #66c093;
+  --danger: #e47c72;
+  --danger-fill: #bc4a41; /* 白字 5:1 */
 
-  --shadow: inset 0 0 0 1px var(--hair);
-  --float: 0 8px 28px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--hair2);
+  /* 面板顶边一道极淡的高光，深色下的层次靠它和发丝线，不靠投影 */
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), inset 0 0 0 1px var(--hair);
+  --float: 0 10px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--hair2);
 }
 
 @theme inline {
@@ -84,9 +92,11 @@
   --color-fg3: var(--fg3);
   --color-accent: var(--accent);
   --color-accent-weak: var(--accent-weak);
+  --color-accent-fill: var(--accent-fill);
   --color-on-accent: var(--on-accent);
   --color-ok: var(--ok);
   --color-danger: var(--danger);
+  --color-danger-fill: var(--danger-fill);
   --color-ring: var(--accent);
 
   --font-sans: "Archivo", "PingFang SC", "Microsoft YaHei", sans-serif;

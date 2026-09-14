@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link2, Plus, RefreshCw } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 
+import appIcon from "@/assets/brand/app-icon.png";
+import appIcon2x from "@/assets/brand/app-icon@2x.png";
+import appIcon3x from "@/assets/brand/app-icon@3x.png";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { proxyStatus } from "@/lib/ipc";
@@ -43,9 +46,16 @@ export function TopBar() {
       {/* 三栏等宽：导航始终居中；右侧文案变长（端口被占）时挤开而不是压上导航 */}
       <div className="mx-auto grid w-full max-w-[964px] grid-cols-[1fr_auto_1fr] items-center gap-4">
         <div className="flex items-center gap-2.5 justify-self-start mac:clear-traffic-lights">
-          <span className="flex size-[26px] items-center justify-center rounded-sm bg-accent text-on-accent">
-            <Link2 size={14} strokeWidth={2.2} />
-          </span>
+          {/* 应用图标本身（branding/icon-source.png 裁掉留白），不随主题换色 */}
+          <img
+            src={appIcon}
+            srcSet={`${appIcon} 1x, ${appIcon2x} 2x, ${appIcon3x} 3x`}
+            width={26}
+            height={26}
+            alt=""
+            draggable={false}
+            className="flex-none"
+          />
           <span className="text-heading tracking-[-0.015em]">ModelLink</span>
         </div>
 
@@ -61,7 +71,7 @@ export function TopBar() {
               className={cn(
                 "relative h-[30px] rounded-[7px] px-3.5 text-[12.5px] font-medium text-fg3 transition-colors outline-none hover:text-fg focus-visible:ring-[3px] focus-visible:ring-ring/40",
                 page === key &&
-                  "bg-white text-fg shadow-[0_1px_2px_rgba(32,28,24,.09),0_0_0_1px_rgba(32,28,24,.06)] dark:bg-[#1b1f23] dark:shadow-[inset_0_0_0_1px_var(--hair2)]",
+                  "bg-white text-fg shadow-[0_1px_2px_rgba(32,28,24,.09),0_0_0_1px_rgba(32,28,24,.06)] dark:bg-white/6 dark:shadow-[inset_0_0_0_1px_var(--hair2)]",
               )}
             >
               {label}

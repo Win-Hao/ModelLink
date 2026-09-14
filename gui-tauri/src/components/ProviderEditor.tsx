@@ -355,7 +355,7 @@ export function ProviderEditor({ index }: { index: number }) {
                 <span className={cn(COL.slot, "text-[12.5px] text-fg2")}>
                   {slot ? (
                     <>
-                      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden className="flex-none text-hair2 dark:text-[#3c444b]">
+                      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden className="flex-none text-hair2 dark:text-white/15">
                         <path d="M2.5 7h9m-3.3-3.3L11.5 7l-3.3 3.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       <b className="mono truncate font-medium text-fg">{slot.slot}</b>

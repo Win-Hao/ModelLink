@@ -11,12 +11,13 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-accent text-on-accent hover:bg-accent/90",
+        // 实心按钮用 *-fill 那一档：深色下比文字用的陶土色 / 红色深一档，白字才清楚
+        default: "bg-accent-fill text-on-accent hover:bg-accent-fill/90",
         ghost:
           "bg-transparent font-medium text-fg shadow-[inset_0_0_0_1px_var(--hair2)] hover:bg-hair",
         danger: "bg-transparent font-medium text-danger hover:bg-danger/10",
-        // 确认删除这类不可逆操作的实心按钮；on-accent 是「实心色块上的字」，深色下是深字
-        destructive: "bg-danger text-on-accent hover:bg-danger/90",
+        // 确认删除这类不可逆操作的实心按钮
+        destructive: "bg-danger-fill text-on-accent hover:bg-danger-fill/90",
         dashed:
           "border border-dashed border-hair2 bg-transparent font-medium text-fg3 hover:border-fg3 hover:text-fg2",
         quiet: "bg-transparent font-medium text-fg3 hover:bg-hair hover:text-fg",

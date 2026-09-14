@@ -14,7 +14,7 @@ import zhipu from "@/assets/providers/zhipu.svg";
 // 没有小尺寸可读字形的品牌（mimo 的图标是两行字标，缩到 20px 就糊了）用白色首字母。
 export type ProviderBrand = { color: string; dark?: string } & ({ glyph: string } | { letter: string });
 
-const KIMI: ProviderBrand = { glyph: kimi, color: "#1c1a17", dark: "#2a2c30" };
+const KIMI: ProviderBrand = { glyph: kimi, color: "#1c1a17", dark: "#2c2b2a" };
 const BAILIAN: ProviderBrand = { glyph: bailian, color: "#e8730c" };
 const BRAND_BY_PRESET: Record<string, ProviderBrand> = {
   deepseek: { glyph: deepseek, color: "#3255e8", dark: "#3f61ea" },

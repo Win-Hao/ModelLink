@@ -151,13 +151,20 @@ pub fn provider_id_for_url(url: &str) -> Option<&'static str> {
         ("moonshot", "moonshotai-cn"),
         ("deepseek.com", "deepseek"),
         ("minimaxi.com", "minimax-cn"),
+        // MiniMax 中国站在换域名：官方文档里的 API 地址已是 api.minimax.cn（api.minimaxi.com 仍可用）
+        ("minimax.cn", "minimax-cn"),
         ("minimax.io", "minimax"),
+        // 小米两条线地址不同（官方文档 + models.dev 的 api 字段一致）：
+        // token-plan-cn.xiaomimimo.com 是 Token Plan（订阅制，全 0 价），api.xiaomimimo.com 是按量付费。
+        // 2.2 之前把后者也映射到 Token Plan，按量用户的费用一律显示 0 —— 假账单。
+        // 两条都必须排在通用的 "token-plan" 前面，否则小米 Token Plan 会被认成百炼。
+        ("token-plan-cn.xiaomimimo", "xiaomi-token-plan-cn"),
+        ("xiaomimimo", "xiaomi"),
         ("coding.dashscope", "alibaba-coding-plan-cn"),
         ("token-plan", "alibaba-token-plan-cn"),
         ("dashscope", "alibaba-cn"),
         ("bigmodel.cn", "zhipuai"),
         ("zhipu", "zhipuai"),
-        ("xiaomimimo", "xiaomi-token-plan-cn"),
     ];
     table.iter().find(|(host, _)| u.contains(host)).map(|(_, id)| *id)
 }
@@ -174,6 +181,7 @@ pub fn known_provider_ids() -> Vec<&'static str> {
         "alibaba-token-plan-cn",
         "alibaba-cn",
         "zhipuai",
+        "xiaomi",
         "xiaomi-token-plan-cn",
     ]
 }
@@ -484,6 +492,9 @@ mod tests {
             "https://coding.dashscope.aliyuncs.com/apps/anthropic",
             "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
             "https://open.bigmodel.cn/api/anthropic",
+            "https://api.minimax.cn/anthropic",
+            "https://api.xiaomimimo.com/anthropic",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
         ] {
             let pid = provider_id_for_url(url).unwrap_or_else(|| panic!("{url} 没映射"));
             assert!(known_provider_ids().contains(&pid), "{pid} 不在 known 列表里");
@@ -655,6 +666,35 @@ mod tests {
         assert_eq!(provider_id_for_url("https://api.example.com/v1"), None);
     }
 
+    /// 小米按量付费（api.xiaomimimo.com）和 Token Plan（token-plan-cn.xiaomimimo.com）是两条线。
+    /// 2.2 之前前者被当成 Token Plan，费用全显示 0；Token Plan 地址又会被通用的 "token-plan" 认成百炼。
+    #[test]
+    fn xiaomi_pay_as_you_go_and_token_plan_are_different_providers() {
+        assert_eq!(provider_id_for_url("https://api.xiaomimimo.com/anthropic"), Some("xiaomi"));
+        assert_eq!(
+            provider_id_for_url("https://token-plan-cn.xiaomimimo.com/anthropic"),
+            Some("xiaomi-token-plan-cn")
+        );
+        let c = parse_catalog(
+            br#"{
+              "xiaomi": {"models": {"mimo-v2.5-pro": {"cost": {"input": 0.435, "output": 0.87}}}},
+              "xiaomi-token-plan-cn": {"models": {"mimo-v2.5-pro": {"cost": {"input": 0, "output": 0}}}}
+            }"#,
+        )
+        .unwrap();
+        let payg = lookup(&c, "https://api.xiaomimimo.com/anthropic", "mimo-v2.5-pro").unwrap();
+        assert_eq!(payg.pricing.input, Some(0.435), "按量付费不能拿到订阅制的 0 价");
+        let plan = lookup(&c, "https://token-plan-cn.xiaomimimo.com/anthropic", "mimo-v2.5-pro").unwrap();
+        assert_eq!(plan.pricing.input, Some(0.0));
+    }
+
+    /// 照 MiniMax 新文档填 api.minimax.cn 的用户，要和老地址拿到同一家的费率与模型清单。
+    #[test]
+    fn minimax_new_china_domain_maps_like_the_old_one() {
+        assert_eq!(provider_id_for_url("https://api.minimax.cn/anthropic"), Some("minimax-cn"));
+        assert_eq!(provider_id_for_url("https://api.minimaxi.com/anthropic"), Some("minimax-cn"));
+        assert_eq!(provider_id_for_url("https://api.minimax.io/anthropic"), Some("minimax"));
+    }
 
     #[test]
     fn lookup_stays_inside_the_matched_provider() {

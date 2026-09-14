@@ -79,6 +79,8 @@ export type Preset = {
   id: string;
   name: string;
   url: string;
+  /** 同一家的其它 API 域名（服务商换域名时，照新文档填的用户也要认得出来） */
+  hosts?: string[];
   models: string[];
   thinkingOptions: string[];
 };
@@ -117,6 +119,8 @@ export const PRESETS: Preset[] = [
     id: "minimax",
     name: "MiniMax",
     url: "https://api.minimaxi.com/anthropic",
+    // 官方文档里的 API 地址已换成 api.minimax.cn（旧域名仍可用，两者是同一个后端）
+    hosts: ["api.minimax.cn"],
     // M3（2026-06-01）是当前旗舰，且是这家唯一有 1M 上下文的。
     models: ["MiniMax-M3", "MiniMax-M2.7"],
     thinkingOptions: ["", "off"],
@@ -172,8 +176,8 @@ export function matchPreset(url: string): Preset | null {
   const u = url.toLowerCase();
   for (const p of PRESETS) {
     try {
-      const host = new URL(p.url).hostname;
-      if (u.includes(host)) return p;
+      const hosts = [new URL(p.url).hostname, ...(p.hosts ?? [])];
+      if (hosts.some((host) => u.includes(host))) return p;
     } catch {
       /* ignore */
     }
@@ -200,13 +204,16 @@ function modelsDevProviderId(url: string): string | undefined {
     ["moonshot", "moonshotai-cn"],
     ["deepseek.com", "deepseek"],
     ["minimaxi.com", "minimax-cn"],
+    ["minimax.cn", "minimax-cn"],
     ["minimax.io", "minimax"],
+    // 小米两条线：Token Plan 有独立域名，api.xiaomimimo.com 是按量付费；都要排在通用的 "token-plan" 前面
+    ["token-plan-cn.xiaomimimo", "xiaomi-token-plan-cn"],
+    ["xiaomimimo", "xiaomi"],
     ["coding.dashscope", "alibaba-coding-plan-cn"],
     ["token-plan", "alibaba-token-plan-cn"],
     ["dashscope", "alibaba-cn"],
     ["bigmodel.cn", "zhipuai"],
     ["zhipu", "zhipuai"],
-    ["xiaomimimo", "xiaomi-token-plan-cn"],
   ];
   return table.find(([host]) => u.includes(host))?.[1];
 }
@@ -263,7 +270,7 @@ export function detectProvider(url: string): string {
   if (u.includes("kimi.com")) return "Kimi Code";
   if (u.includes("moonshot")) return "Kimi";
   if (u.includes("xiaomimimo") || u.includes("mimo")) return "mimo";
-  if (u.includes("minimaxi.com")) return "MiniMax";
+  if (u.includes("minimaxi.com") || u.includes("minimax.cn")) return "MiniMax";
   if (u.includes("openai.com")) return "OpenAI";
   if (u.includes("openrouter")) return "OpenRouter";
   if (u.includes("groq.com")) return "Groq";

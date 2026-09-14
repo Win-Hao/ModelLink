@@ -118,7 +118,7 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
 
 - **一次抓取两用**：`fetch_catalog` 同时返回费率表和模型 ID 索引。
   费率只收有 `cost` 的条目；模型清单要列全，两个独立解析函数。
-- **只存认得的 10 家**。api.json 有 213 家，全存进 config.json 会让它从 600 字节涨到 238 KB，
+- **只存认得的 11 家**。api.json 有 213 家，全存进 config.json 会让它从 600 字节涨到 238 KB，
   而那文件每次编辑都要重写。`provider_id_for_url` 的值域必须与 `known_provider_ids()` 一致（有测试钉住）。
 - **上下文可以跨服务商借，价格绝对不能**。上下文是模型自身属性；价格是服务商属性，
   同一模型在订阅制那家是 0、在按量付费那家可能是 0.95。

@@ -101,10 +101,18 @@ pub fn run() {
                     // 先判要不要同步 —— api.json 有 4.5 MB，不到 6 小时阈值就别下
                     {
                         let cur = st.config.read().unwrap_or_else(|e| e.into_inner());
-                        // 2.2 起还要存模型上下文：老用户升级后没有这份数据就补抓一次，不等 6 小时
+                        // 2.2 起还要存模型上下文：老用户升级后没有这份数据就补抓一次，不等 6 小时。
+                        // 同理，配置里某家服务商对应的清单还没抓过（新认得的服务商、映射改过，
+                        // 如小米按量付费从 Token Plan 改成 xiaomi），也补抓 —— 否则费率要等 6 小时才纠正
+                        let missing_provider = cur
+                            .providers
+                            .iter()
+                            .filter_map(|p| models_dev::provider_id_for_url(&p.target_url))
+                            .any(|pid| !cur.models_dev_models.contains_key(pid));
                         if !cur.pricing_auto_sync
                             || (!models_dev::is_stale(&cur.pricing_synced_at, models_dev::now_secs())
-                                && !cur.models_dev_context.is_empty())
+                                && !cur.models_dev_context.is_empty()
+                                && !missing_provider)
                         {
                             return;
                         }

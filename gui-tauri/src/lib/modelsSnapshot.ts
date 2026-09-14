@@ -1,11 +1,11 @@
 // 由 scripts/sync-models-snapshot.mjs 生成，请勿手改。
-// 数据源：https://models.dev/api.json　抓取日期：2026-09-10
+// 数据源：https://models.dev/api.json　抓取日期：2026-09-14
 //
 // 这是**兜底**清单：模型名输入框优先用运行时同步来的数据，拉不到时才用这份。
 // 发版前跑 `npm run sync-models` 刷新，把改动一起提交。
 
 /** 抓取日期，界面上标注「截至 X」用。 */
-export const MODELS_SNAPSHOT_DATE = "2026-09-10";
+export const MODELS_SNAPSHOT_DATE = "2026-09-14";
 
 /** models.dev 服务商 ID → 模型 ID（发布日期新→旧）。 */
 export const MODELS_SNAPSHOT: Record<string, string[]> = {
@@ -22,9 +22,10 @@ export const MODELS_SNAPSHOT: Record<string, string[]> = {
     "kimi-k2.6"
   ],
   "deepseek": [
+    "deepseek-flash",
+    "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash"
+    "deepseek-v4-pro"
   ],
   "minimax-cn": [
     "MiniMax-M3",
@@ -191,6 +192,14 @@ export const MODELS_SNAPSHOT: Record<string, string[]> = {
     "glm-4.5",
     "glm-4.5-air",
     "glm-4.5-flash"
+  ],
+  "xiaomi": [
+    "mimo-v2.5-pro-ultraspeed",
+    "mimo-v2.5",
+    "mimo-v2.5-pro",
+    "mimo-v2-omni",
+    "mimo-v2-pro",
+    "mimo-v2-flash"
   ],
   "xiaomi-token-plan-cn": [
     "mimo-v2.5",

@@ -23,6 +23,7 @@ const KNOWN = [
   "alibaba-token-plan-cn",
   "alibaba-cn",
   "zhipuai",
+  "xiaomi",
   "xiaomi-token-plan-cn",
 ];
 

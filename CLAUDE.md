@@ -143,6 +143,8 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
   后面的全部挪位，Auto 模式和 Claude 里选着的对话都会悄悄变。规则前后端各一份
   （`config.rs::normalize_slots` / `presets.ts::normalizeSlots`），改一处必须两边一起改。
   名字决定 Auto 模式和思考档位，核实表在 design-2.1 §七⑧。
+  新模型按 `SLOT_PREFERENCE`（claude-sonnet-5 先，Auto 模式的安全检查优先发给它）拿名字；
+  **`SLOT_POOL` 自己的顺序不能动** —— 应用过、没存名字的老配置要按它补回当时的映射。
 - **本机挂着系统 HTTP 代理时，reqwest 连 127.0.0.1 也会走代理**（macOS 代理例外列表不生效）：
   连不上的端口会变成代理回的 502。起假上游的 Rust 测试一律 `Client::builder().no_proxy()`。
 - **Chat 模式的系统提示词里没有当前模型 ID**：只在 `organizationInstructions` 里列全部

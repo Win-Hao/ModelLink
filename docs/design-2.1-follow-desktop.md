@@ -853,14 +853,45 @@ return true   // bP = anthropicAws || anthropicGoogleCloud；网关是 "gateway"
 - 表里的「思考模式 auto / extended」是思考方式（adaptive / 固定预算），和 Auto 权限模式是两回事。
 - 引擎是压缩过的，函数名每一版都变（2.1.270 里拆成了 `fae` + `Xce`）。复核时别按函数名搜，
   按排除名单里的字面量搜，比如 `==="claude-sonnet-4-6"||`。
+- 名字里带 fable / mythos 的（正则 `^(?:claude-)?(?:fable|mythos)(?:-|$)`）桌面端一律给 5 档 + auto 思考，
+  引擎也不排除 Auto 模式，看起来能无限扩。**但不能拿来当映射名**：桌面端专门留了一份「暂不可用」名单
+  （`qTt`，这个版本是空的，配套链接 fable-mythos-access），引擎对 Fable 还有额度检查和拒答回退逻辑。
+
+**Auto 模式的安全检查发给谁**（2026-09-15，Claude Code 2.1.270 读代码 + 实测）。
+
+每一步要检查的操作前，引擎另发一次请求让模型判断：系统提示词开头是
+`You are a security monitor for autonomous AI coding agents`（约 12.8 万字符）；第一阶段 `max_tokens: 64`、关思考，
+只回 `<severity>N</severity>`，判不出时升级第二阶段（`max_tokens: 8192`）。读文件、搜代码、在工作目录里建文件、
+`ls` 这类不检查。
+
+- **发给谁**：服务端下发的配置（第三方模式下没有）→ `claude-sonnet-5`（对话模型不是 sonnet-4-6 / sonnet-4-5 / haiku，
+  且 claude-sonnet-5 在可用模型里）→ 对话自己的模型。
+- **桌面端第三方模式会把已映射的名字作为 `availableModels` 交给引擎**（按 `inferenceModels` 生成），
+  所以没映射 claude-sonnet-5 时，检查直接用对话模型。
+- claude-sonnet-5 的检查请求失败一次，这个会话后面的检查都改用对话模型（引擎日志 `Sonnet 5 probe demotion`）。
+- 两个都失败才拦：`Auto mode classifier unavailable, denying with retry guidance (fail closed)`，只读操作不受影响。
+- Auto 模式下主对话请求多带一个 `afk-mode-2026-01-31` beta 头（Kimi、DeepSeek 都照收）。
+
+实测（用桌面端自带的引擎按同样方式传可用模型、开 Auto 模式跑命令；第 3–5 轮在引擎和 ModelLink 之间加一层转发故意出错）：
+
+| 轮 | 条件 | 检查发给了谁 | 结果 |
+|---|---|---|---|
+| 1 | claude-sonnet-5 有映射 | claude-sonnet-5（deepseek-v4-flash），每次约 1 秒 | 执行 |
+| 2 | 可用模型里没有 claude-sonnet-5 | 对话模型 claude-opus-5（k3），每次约 3.6 秒 | 执行 |
+| 3 | claude-sonnet-5 的检查请求报错 | 先 claude-sonnet-5 失败，立刻换 claude-opus-5 | 执行 |
+| 4 | 所有检查请求报错 | 两个都失败 | 命令被拦，模型重试几次后放弃 |
+| 5 | 检查回答格式不对 | 第一阶段重试 5 次后升级第二阶段 | 执行，这一步等了 63 秒 |
+
+ModelLink 据此（2.2）：新加的模型先拿 claude-sonnet-5，让检查由第一个（主力）模型来做；映射下拉标出
+「优先做 Auto 安全检查」；请求日志认出检查请求、标「Auto 模式安全检查」；带发布日期的名字按同一代号转发。
+
+顺带发现：Code 会话起标题的提示词是 `You are naming a coding session…`，和 Chat 的
+`You are coming up with a succinct title` 不一样 —— ModelLink 的「标题生成省思考」目前只认后者。
 
 **升级到 1.52386.6 的复核**（2026-09-15）：ModelLink 写的键、一键 Winhao 配置的 15 个开关，
 键名、类型、取值范围、默认值、起始版本全部未变；1.49585.0 之后没有新加任何配置键；档位表、fable/mythos 规则、
 「暂不可用」名单（仍为空）未变；排期中的弃用项没有一个涉及 ModelLink 写的值（鉴权方式固定写 `bearer`，
 `sso` / `auto` 按原计划 2026-10-07 停止支持）。Claude 启动日志：`ConfigHealth healthy`、`picker = 5`。
-- 名字里带 fable / mythos 的（正则 `^(?:claude-)?(?:fable|mythos)(?:-|$)`）桌面端一律给 5 档 + auto 思考，
-  引擎也不排除 Auto 模式，看起来能无限扩。**但不能拿来当映射名**：桌面端专门留了一份「暂不可用」名单
-  （`qTt`，这个版本是空的，配套链接 fable-mythos-access），引擎对 Fable 还有额度检查和拒答回退逻辑。
 
 `claude-opus-5` 在本机 1.46388.3 的 `Vwt` 表里确认带
 `effortLevels:["low","medium","high","xhigh","max"], recommended:"high", modes:["auto"]`

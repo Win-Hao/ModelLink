@@ -42,6 +42,8 @@ pub fn save_config(state: State<'_, Arc<ProxyState>>, mut config: Config) -> Res
         // 后台同步可能刚写完，而前端手上这份草稿是同步前的 —— 别让它抹掉同步结果
         models_dev::preserve_synced_pricing(&mut config, &cur);
     }
+    // 前端改完已经分好了；这里再过一遍，重复的、认不出的名字不会写进 Claude
+    crate::config::normalize_slots(&mut config);
     // 刚挑的模型：同步来的上下文上限先补上，1M 开关马上就能判断
     models_dev::fill_known_context(&mut config);
     save_config_file(&config)?;

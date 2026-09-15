@@ -19,16 +19,19 @@ use std::path::PathBuf;
 /// 2.1-B §3.6：8 → 20。官方 `inferenceModels` 上限是 200 条，20 留足余量。
 pub const MAX_MODELS: usize = 20;
 
-/// 槽位池（§2.1）。顺序即分配优先级 —— Claude Desktop 内有一张按**模型 ID 精确匹配**
-/// 的硬编码表（`Vwt`）决定模型选择器里出不出现推理强度 / 思考模式选项，排在前面的
-/// 槽位档位更全：
+/// 槽位池（§2.1）。顺序即新模型默认拿名字的先后 —— Claude 按**模型 ID 精确匹配**
+/// 决定这个模型在 Claude 里能用什么，排在前面的更全：
 ///
-/// | 槽位 | 桌面端 effort 档位 | 思考模式 |
-/// |---|---|---|
-/// | opus-5 / sonnet-5 / opus-4-8 / opus-4-7 | low/medium/high/xhigh/max | auto |
-/// | opus-4-6 | low/medium/high/max | extended |
-/// | sonnet-4-6 | low/medium/high/max | auto |
-/// | sonnet-4-5 / haiku-4-5 | 无 | extended |
+/// | 槽位 | 桌面端 effort 档位 | 思考模式 | Auto 模式（走网关时） |
+/// |---|---|---|---|
+/// | opus-5 / sonnet-5 / opus-4-8 / opus-4-7 | low/medium/high/xhigh/max | auto | 有 |
+/// | opus-4-6 | low/medium/high/max | extended | 没有 |
+/// | sonnet-4-6 | low/medium/high/max | auto | 没有 |
+/// | sonnet-4-5 / haiku-4-5 | 无 | extended | 没有 |
+///
+/// 档位和思考模式来自桌面端的硬编码表（`Vwt`）。Auto 模式来自桌面端自带的 Claude Code 引擎
+/// （2.1.260 的 `Foe`）：claude-3-*、opus-4-0/4-1/4-5、sonnet-4-0/4-5、haiku-4-5 一律没有；
+/// 不是官方直连时，opus-4-6、sonnet-4-6 和所有 haiku 也没有。「思考模式 auto」和 Auto 模式是两回事。
 ///
 /// 换掉 2.0 的 8 个 legacy 槽位（`claude-3-opus-latest` 等）—— 那些一个都不在 `Vwt` 表里，
 /// 桌面端根本不渲染推理强度选择器，这正是 v1 只能在代理里硬注入 effort 的原因。
@@ -52,17 +55,78 @@ pub const SLOT_POOL: &[&str] = &[
 
 /// 槽位池代号 —— **换槽位池时必须一并改这个值**。
 ///
-/// config.json 里不存 slot（`flatten_config` 时按顺序现算），所以换池子不需要迁移
-/// 配置文件；但用户 Claude Desktop 里写着的还是旧槽位，不重新应用就用不上新选择器。
+/// 用户 Claude Desktop 里写着的还是旧槽位，不重新应用就用不上新选择器。
 /// 池代号进 `canonical_hash` 保证升级后状态机变 dirty，用户会被提示去点「应用」。
+/// ⚠️ 2.2 起每个模型用的名字存在 config.json 里（[`ModelEntry::slot`]），
+/// 换池子时存着的旧名字不会自动换掉 —— 要连同迁移一起想。
 pub const SLOT_POOL_VERSION: &str = "2.1";
 
-/// 第 `index` 个模型（0-based）占的槽位。池子用完后走 `claude-ml-{n}` 溢出层：
+/// 名字表里第 `index` 个（0-based）。池子用完后走 `claude-ml-{n}` 溢出层：
 /// 无 effort 选择器的纯占位名，可无限扩，且含 "claude" 能过桌面端的名字过滤器（§1.3）。
 pub fn slot_id(index: usize) -> String {
     match SLOT_POOL.get(index) {
         Some(id) => (*id).to_string(),
         None => format!("claude-ml-{}", index - SLOT_POOL.len() + 1),
+    }
+}
+
+/// 能写进 Claude 的全部名字：先是 [`SLOT_POOL`]，再是溢出层，共 [`MAX_MODELS`] 个。
+/// 顺序就是新模型默认拿名字的先后。
+pub fn slot_names() -> Vec<String> {
+    (0..MAX_MODELS).map(slot_id).collect()
+}
+
+fn is_slot_name(s: &str) -> bool {
+    SLOT_POOL.contains(&s)
+        || s.strip_prefix("claude-ml-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some_and(|n| (1..=MAX_MODELS - SLOT_POOL.len()).contains(&n))
+}
+
+/// 会写进 Claude 的模型里，有没有名字没定下来的（空、认不出、和前面重复）。
+fn needs_slots(config: &Config) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    for m in config.providers.iter().flat_map(|p| &p.models).filter(|m| !m.name.is_empty()).take(MAX_MODELS) {
+        if !is_slot_name(&m.slot) || seen.contains(&m.slot.as_str()) {
+            return true;
+        }
+        seen.push(&m.slot);
+    }
+    false
+}
+
+/// 给每个会写进 Claude 的模型定下它在 Claude 里用的名字（2.2）。
+///
+/// 原先按位置现算：在前面加一个或删一个模型，后面的全部挪一位 —— Claude 里的名字变了，
+/// Auto 模式和思考档位跟着变，Claude 里选着那个名字的对话也悄悄换成了别的模型。
+/// 现在名字存在 [`ModelEntry::slot`]，增删不挪别人的；用户在服务商页可以换（换到被占的名字就互换）。
+///
+/// - 已经定下、认得出、没和前面重复的：原样保留
+/// - 其余有名字的（新加的、2.2 之前的老配置）：按 [`slot_names`] 的顺序拿第一个空着的。
+///   老配置一个都没存过，拿到的正好就是原来按位置算出来的那一份 —— 升级后 Claude 里什么都不变
+/// - 没名字的行、超出 [`MAX_MODELS`] 的：不占名字
+pub fn normalize_slots(config: &mut Config) {
+    let mut used = std::collections::HashSet::new();
+    let mut waiting = Vec::new();
+    let mut count = 0;
+    for (pi, p) in config.providers.iter_mut().enumerate() {
+        for (mi, m) in p.models.iter_mut().enumerate() {
+            if m.name.is_empty() || count >= MAX_MODELS {
+                m.slot.clear();
+                continue;
+            }
+            count += 1;
+            if !(is_slot_name(&m.slot) && used.insert(m.slot.clone())) {
+                m.slot.clear();
+                waiting.push((pi, mi));
+            }
+        }
+    }
+    let mut free = slot_names().into_iter().filter(|n| !used.contains(n));
+    for (pi, mi) in waiting {
+        if let Some(n) = free.next() {
+            config.providers[pi].models[mi].slot = n;
+        }
     }
 }
 
@@ -181,6 +245,10 @@ pub struct ModelEntry {
     /// 用来判断「开着 1M 但这个模型根本装不下」。None = 未知，不下结论。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<u64>,
+    /// 2.2：它在 Claude 里用的名字（`claude-opus-5` 这类），决定它在 Claude 里有没有 Auto 模式、
+    /// 能调几档思考。存下来而不是按位置现算，见 [`normalize_slots`]。空 = 不写进 Claude（没名字的行）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub slot: String,
 }
 
 /// 「1M 上下文」的判定门槛。各家给的数字不一样：Kimi 是 1048576，
@@ -248,12 +316,15 @@ pub fn config_path() -> PathBuf {
 
 pub fn load_config() -> Config {
     let path = config_path();
-    if path.exists() {
+    let mut config: Config = if path.exists() {
         let data = std::fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&data).unwrap_or_default()
     } else {
         Config::default()
-    }
+    };
+    // 2.2 之前的配置没存 Claude 里的名字：按原来的位置规则补上，Claude 里什么都不变
+    normalize_slots(&mut config);
+    config
 }
 
 pub fn friendly_write_error(e: &std::io::Error, path: &PathBuf) -> String {
@@ -315,8 +386,14 @@ pub fn canonical_hash(config: &Config) -> String {
 
 /// 同上，槽位池代号可注入 —— 仅为单测能验证「换池子会让老 hash 失效」。
 pub fn canonical_hash_with_pool(config: &Config, pool_version: &str) -> String {
+    // Claude 里的名字不进哈希：老配置补上名字后哈希要是变了，升级完就会平白提示「要应用」。
+    // 换了名字要不要应用，看 Claude 那边实际写着的（前端逐条比 applied_state）
+    let mut providers = config.providers.clone();
+    for m in providers.iter_mut().flat_map(|p| p.models.iter_mut()) {
+        m.slot.clear();
+    }
     let canon = Config {
-        providers: config.providers.clone(),
+        providers,
         port: config.port,
         ..Default::default()
     };
@@ -366,13 +443,19 @@ pub struct FlatEntry {
 }
 
 pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
+    // 读盘、保存时都规范过；手工构造的配置（单测）没定名字，现补一份，规则相同
+    if needs_slots(config) {
+        let mut normalized = config.clone();
+        normalize_slots(&mut normalized);
+        return flatten_config(&normalized);
+    }
     let mut result = Vec::new();
     let mut count = 0;
     for provider in &config.providers {
         for m in &provider.models {
             if count < MAX_MODELS && !m.name.is_empty() {
                 result.push(FlatEntry {
-                    slot: slot_id(count),
+                    slot: m.slot.clone(),
                     name: m.name.clone(),
                     to_1m: m.to_1m.clone(),
                     url: provider.target_url.clone(),
@@ -549,7 +632,107 @@ mod tests {
         assert_eq!(flat[0].name, "real");
     }
 
+    // ---- 2.2 每个模型存下它在 Claude 里的名字 ----
+
+    fn slots(cfg: &Config) -> Vec<(String, String)> {
+        flatten_config(cfg).into_iter().map(|e| (e.name, e.slot)).collect()
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    /// 2.2 之前的配置没存名字：补上的正好是原来按位置算出来的那一份，升级后 Claude 里什么都不变。
+    #[test]
+    fn old_configs_keep_the_mapping_they_were_applied_with() {
+        let mut cfg = sample_config();
+        normalize_slots(&mut cfg);
+        let stored: Vec<String> = cfg.providers.iter().flat_map(|p| &p.models).map(|m| m.slot.clone()).collect();
+        assert_eq!(stored, (0..3).map(slot_id).collect::<Vec<_>>());
+    }
+
+    /// 删掉前面的模型、在前面的服务商里加模型，别的模型在 Claude 里的名字都不动。
+    #[test]
+    fn adding_or_removing_a_model_does_not_move_the_others() {
+        let mut cfg = sample_config();
+        normalize_slots(&mut cfg);
+
+        cfg.providers[0].models.remove(0);
+        normalize_slots(&mut cfg);
+        assert_eq!(slots(&cfg), pairs(&[("model-a2", "claude-sonnet-5"), ("model-b1", "claude-opus-4-8")]));
+
+        // 新加的拿能力最强的空位（刚空出来的 opus-5），不是排到最后
+        cfg.providers[0].models.push(model("model-a3", ""));
+        normalize_slots(&mut cfg);
+        assert_eq!(
+            slots(&cfg),
+            pairs(&[("model-a2", "claude-sonnet-5"), ("model-a3", "claude-opus-5"), ("model-b1", "claude-opus-4-8")])
+        );
+    }
+
+    /// 用户换过的名字存得住；重复的、认不出的会重新分配，没名字的行不占名字。
+    #[test]
+    fn chosen_names_stick_and_bad_ones_are_cleaned_up() {
+        let mut cfg = sample_config();
+        cfg.providers[0].models[0].slot = "claude-opus-4-7".into(); // 用户换的
+        cfg.providers[0].models[1].slot = "claude-opus-4-7".into(); // 和前面重复
+        cfg.providers[1].models[0].slot = "claude-3-opus-latest".into(); // 认不出
+        cfg.providers[1].models.push(ModelEntry { slot: "claude-opus-5".into(), ..Default::default() }); // 没名字
+        normalize_slots(&mut cfg);
+        assert_eq!(
+            slots(&cfg),
+            pairs(&[("model-a1", "claude-opus-4-7"), ("model-a2", "claude-opus-5"), ("model-b1", "claude-sonnet-5")])
+        );
+        assert_eq!(cfg.providers[1].models[1].slot, "");
+    }
+
+    /// 溢出层的名字认得出，再规范一次不会被换掉；第 21 个模型不占名字（本来就不写进 Claude）。
+    #[test]
+    fn overflow_names_are_kept_and_the_21st_model_gets_none() {
+        let models: Vec<ModelEntry> = (0..21).map(|i| model(&format!("m{i}"), "")).collect();
+        let mut cfg = Config { providers: vec![provider("https://a.example.com", "k", models, "")], ..Default::default() };
+        normalize_slots(&mut cfg);
+        let first: Vec<String> = cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect();
+        assert_eq!(first[19], "claude-ml-12");
+        assert_eq!(first[20], "");
+        normalize_slots(&mut cfg);
+        assert_eq!(cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect::<Vec<_>>(), first);
+    }
+
+    /// Claude 里的名字不进哈希：老配置补上名字后，升级完不能平白提示「要应用」。
+    #[test]
+    fn slot_names_do_not_change_the_applied_hash() {
+        let cfg = sample_config();
+        let mut named = cfg.clone();
+        normalize_slots(&mut named);
+        assert_eq!(named.providers[0].models[0].slot, "claude-opus-5");
+        assert_eq!(canonical_hash(&cfg), canonical_hash(&named));
+    }
+
+    /// 名字存进 config.json，读回来还是它；没名字的行不写这个字段。
+    #[test]
+    fn slot_round_trips_through_config_json() {
+        let mut cfg = sample_config();
+        cfg.providers[0].models.push(model("", ""));
+        normalize_slots(&mut cfg);
+        cfg.providers[0].models[0].slot = "claude-opus-4-7".into();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(json.matches("\"slot\"").count(), 3, "{json}");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(slots(&back), slots(&cfg));
+    }
+
     // ---- resolve_model ----
+
+    /// 代理按存下来的名字找模型，不按位置。
+    #[test]
+    fn resolve_follows_the_stored_name() {
+        let mut cfg = sample_config();
+        normalize_slots(&mut cfg);
+        cfg.providers[0].models[0].slot = "claude-opus-4-7".into();
+        assert_eq!(resolve_model("claude-opus-4-7", &cfg).unwrap().model, "model-a1");
+        assert!(matches!(resolve_model("claude-opus-5", &cfg), Err(ResolveError::UnmappedSlot(_))));
+    }
 
     #[test]
     fn resolve_matches_slot_to_provider_model() {

@@ -670,24 +670,43 @@ pub struct PendingApply {
     pub port_changed: Option<bool>,
     /// 写进 Claude 的费率表和按现在的配置该写的不一样（同步来了新价、换了模型）
     pub pricing: bool,
+    /// 「允许联网的域名」不再放行全部：Cowork 和 Code 里抓网页、装包会 403
+    pub egress: bool,
+    /// 模型身份说明没了（被删、被整段换掉）：模型可能自称 Claude
+    pub identity: bool,
 }
 
 fn pending_against(config: &Config, file: &serde_json::Value, gate: &VersionGate) -> PendingApply {
     let url = format!("http://127.0.0.1:{}", config.port);
+    let flat = flatten_config(config);
     let gateway = file.get("inferenceProvider").and_then(|v| v.as_str()) != Some("gateway")
         || file.get("inferenceGatewayBaseUrl").and_then(|v| v.as_str()) != Some(url.as_str());
     // 用写入时的同一个函数生成「该写成什么样」，再和文件逐值比 —— 不在这里另写一套规则
     let pricing = gate.allows("inferenceModelPricing") && {
         let mut want = serde_json::json!({});
-        write_pricing_keys(&mut want, &flatten_config(config));
+        write_pricing_keys(&mut want, &flat);
         want.get("inferenceModelPricingEnabled") != file.get("inferenceModelPricingEnabled")
             || want.get("inferenceModelPricing") != file.get("inferenceModelPricing")
     };
+    // 下面两项在 Claude 的设置页里都能改。改掉之后模型列表照样对得上、界面上一切正常，功能却坏了。
+    // 只看会不会坏事，不逐字比：列表里还有 * 就是放行全部；身份说明前后加了别的话，代理照样认得出
+    let egress = !file
+        .get("coworkEgressAllowedHosts")
+        .and_then(|v| v.as_array())
+        .is_some_and(|hosts| hosts.iter().any(|h| h.as_str() == Some("*")));
+    let identity = gate.allows("organizationInstructions")
+        && !flat.is_empty()
+        && !file
+            .get("organizationInstructions")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::identity::has_note);
     PendingApply {
         found: true,
         gateway,
         port_changed: config.last_applied_port.map(|p| p != config.port),
         pricing,
+        egress,
+        identity,
     }
 }
 
@@ -789,11 +808,12 @@ pub fn apply_winhao_preset() -> Result<usize, String> {
 pub fn read_pending_apply(config: &Config) -> PendingApply {
     match read_applied_json() {
         Some(json) => pending_against(config, &json, &VersionGate::detect()),
+        // 整份配置都没有：「没接到 ModelLink」已经说明一切，其余几项不再单独报
         None => PendingApply {
             found: false,
             gateway: true,
             port_changed: config.last_applied_port.map(|p| p != config.port),
-            pricing: false,
+            ..Default::default()
         },
     }
 }
@@ -1319,6 +1339,10 @@ mod tests {
         if gate.allows("inferenceModelPricing") {
             write_pricing_keys(&mut file, &flat);
         }
+        if gate.allows("organizationInstructions") {
+            let slot_map: Vec<(String, String)> = flat.iter().map(|e| (e.slot.clone(), e.name.clone())).collect();
+            write_org_instructions(&mut file, &slot_map);
+        }
         file
     }
 
@@ -1334,7 +1358,7 @@ mod tests {
         let file = written_by_apply(&cfg, &gate);
         assert_eq!(
             pending_against(&cfg, &file, &gate),
-            PendingApply { found: true, gateway: false, port_changed: Some(false), pricing: false }
+            PendingApply { found: true, port_changed: Some(false), ..Default::default() }
         );
     }
 
@@ -1352,7 +1376,7 @@ mod tests {
         assert_ne!(crate::config::canonical_hash(&cfg), crate::config::canonical_hash(&edited));
         assert_eq!(
             pending_against(&edited, &file, &gate),
-            PendingApply { found: true, gateway: false, port_changed: Some(false), pricing: false }
+            PendingApply { found: true, port_changed: Some(false), ..Default::default() }
         );
     }
 
@@ -1400,6 +1424,38 @@ mod tests {
         file["inferenceGatewayBaseUrl"] = serde_json::json!("http://127.0.0.1:5678");
         file["inferenceProvider"] = serde_json::json!("anthropic");
         assert!(pending_against(&cfg, &file, &gate).gateway);
+    }
+
+    /// 在 Claude 的设置页里改掉了 ModelLink 离不开的两项：模型列表照样对得上，功能却坏了，要应用。
+    #[test]
+    fn claude_side_edits_that_break_things_need_apply() {
+        let gate = VersionGate::with_version(None);
+        let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
+        let file = written_by_apply(&cfg, &gate);
+
+        // 联网域名：清空、换成白名单都会让抓网页和装包失败；还带着 * 就照样放行全部
+        let mut f = file.clone();
+        f.as_object_mut().unwrap().remove("coworkEgressAllowedHosts");
+        assert!(pending_against(&cfg, &f, &gate).egress);
+        f["coworkEgressAllowedHosts"] = serde_json::json!(["api.github.com"]);
+        assert!(pending_against(&cfg, &f, &gate).egress);
+        f["coworkEgressAllowedHosts"] = serde_json::json!(["api.github.com", "*"]);
+        assert!(!pending_against(&cfg, &f, &gate).egress);
+
+        // 身份说明：删掉、整段换掉都认不出；前后加了自己的话不算
+        let note = file["organizationInstructions"].as_str().unwrap().to_string();
+        let mut f = file.clone();
+        f.as_object_mut().unwrap().remove("organizationInstructions");
+        assert!(pending_against(&cfg, &f, &gate).identity);
+        f["organizationInstructions"] = serde_json::json!("回答用中文。");
+        assert!(pending_against(&cfg, &f, &gate).identity);
+        f["organizationInstructions"] = serde_json::json!(format!("回答用中文。\n{note}"));
+        assert!(!pending_against(&cfg, &f, &gate).identity);
+
+        // 老版 Claude 不认这个键，ModelLink 本来就不写，不能因为它要求应用
+        let old = VersionGate::with_version(Some("1.30000.0"));
+        let f = written_by_apply(&cfg, &old);
+        assert!(!pending_against(&cfg, &f, &old).identity);
     }
 
     /// 2.2 之前应用的：不知道当时的端口，交给前端退回按哈希判断。

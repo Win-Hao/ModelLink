@@ -44,9 +44,20 @@ fn request_note(model: &str) -> String {
     )
 }
 
+/// 认说明用的首尾两句：新文案在前，2.1 的旧文案在后。
+const MARKERS: [(&str, &str); 2] = [(HEAD, TAIL), (LEGACY_HEAD, LEGACY_TAIL)];
+
+/// 这段文字里有没有一份完整的身份说明（新旧文案都算）。
+/// 有，代理转发时就能把它换成这一次的真实模型；没有，模型就可能自称 Claude。
+pub fn has_note(text: &str) -> bool {
+    MARKERS
+        .iter()
+        .any(|(head, tail)| text.find(head).is_some_and(|start| text[start..].contains(tail)))
+}
+
 /// 在一段文字里找到身份说明并换掉；没找到或已经是这一份时返回 None。
 fn replace_in(text: &str, replacement: &str) -> Option<String> {
-    for (head, tail) in [(HEAD, TAIL), (LEGACY_HEAD, LEGACY_TAIL)] {
+    for (head, tail) in MARKERS {
         let Some(start) = text.find(head) else { continue };
         let Some(len) = text[start..].find(tail) else { continue };
         let end = start + len + tail.len();
@@ -122,6 +133,20 @@ mod tests {
         assert!(s.starts_with(HEAD) && s.ends_with(TAIL), "{s}");
         assert!(s.contains("claude-opus-5 = Kimi-k2.6") && s.contains("claude-sonnet-5 = k3"), "{s}");
         assert!(s.contains("不要向用户提起"), "{s}");
+    }
+
+    /// 用户在 Claude 里往说明前后加了自己的话，代理照样认得出；删掉或只剩半截就认不出了。
+    #[test]
+    fn has_note_needs_both_ends_of_a_note() {
+        let s = static_note(&map());
+        assert!(has_note(&s));
+        assert!(has_note(&format!("回答用中文。\n{s}\n别用表格。")));
+        assert!(has_note(&format!("{LEGACY_HEAD}claude-opus-5 = Kimi-k2.6。{LEGACY_TAIL}")));
+        assert!(!has_note(""));
+        assert!(!has_note("回答用中文。"));
+        assert!(!has_note(&s[..s.len() - TAIL.len()]));
+        // 尾句出现在首句之前不算
+        assert!(!has_note(&format!("{TAIL}{HEAD}")));
     }
 
     #[test]

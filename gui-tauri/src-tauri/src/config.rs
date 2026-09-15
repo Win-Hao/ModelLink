@@ -57,6 +57,25 @@ pub const SLOT_POOL: &[&str] = &[
     "claude-haiku-4-5",
 ];
 
+/// 新加的模型默认拿名字的先后（2.2）。和 [`SLOT_POOL`] 是同一组名字，只是 claude-sonnet-5 排第一。
+///
+/// Auto 模式每一步的安全检查优先发给 claude-sonnet-5，它没映射或出错才改用对话自己的模型
+/// （桌面端自带引擎的规则，实测见 design-2.1 §七⑧）。第一个模型放在这里，检查就由主力模型来做；
+/// 只配一个模型时，检查和对话是同一个模型，不会跑到别的服务商去扣费。
+/// 代价：桌面端给 claude-sonnet-5 的默认思考档是 medium，claude-opus-5 是 high。
+///
+/// ⚠️ [`SLOT_POOL`] 自己的顺序不能跟着改：2.2 之前应用过的配置没存名字，要按它原样补回当时的映射。
+pub const SLOT_PREFERENCE: &[&str] = &[
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+];
+
 /// 槽位池代号 —— **换槽位池时必须一并改这个值**。
 ///
 /// 用户 Claude Desktop 里写着的还是旧槽位，不重新应用就用不上新选择器。
@@ -84,10 +103,18 @@ fn needs_slots(config: &Config) -> bool {
 /// 现在名字存在 [`ModelEntry::slot`]，增删不挪别人的；用户在服务商页可以换（换到被占的名字就互换）。
 ///
 /// - 已经定下、认得出、没和前面重复的：原样保留
-/// - 其余有名字的（新加的、2.2 之前的老配置）：按 [`SLOT_POOL`] 的顺序拿第一个空着的。
-///   老配置一个都没存过，拿到的正好就是原来按位置算出来的那一份 —— 升级后 Claude 里什么都不变
+/// - 其余有名字的：按 [`SLOT_PREFERENCE`] 的顺序拿第一个空着的（第一个模型拿 claude-sonnet-5）
+/// - 例外是 2.2 之前应用过的配置（应用过、一个名字都没存）：按 [`SLOT_POOL`] 的位置顺序补，
+///   拿到的正好就是当时写进 Claude 的那一份 —— 升级后 Claude 里什么都不变
 /// - 没名字的行、超出 [`MAX_MODELS`] 的：不占名字
 pub fn normalize_slots(config: &mut Config) {
+    let legacy = !config.last_applied_at.is_empty()
+        && config.providers.iter().flat_map(|p| &p.models).filter(|m| !m.name.is_empty()).all(|m| m.slot.is_empty());
+    fill_slots(config, if legacy { SLOT_POOL } else { SLOT_PREFERENCE });
+}
+
+/// 给没定下名字的模型按 `order` 拿第一个空位，规则见 [`normalize_slots`]。
+fn fill_slots(config: &mut Config, order: &[&str]) {
     let mut used = std::collections::HashSet::new();
     let mut waiting = Vec::new();
     let mut count = 0;
@@ -104,7 +131,7 @@ pub fn normalize_slots(config: &mut Config) {
             }
         }
     }
-    let mut free = SLOT_POOL.iter().filter(|n| !used.contains(**n));
+    let mut free = order.iter().filter(|n| !used.contains(**n));
     for (pi, mi) in waiting {
         if let Some(n) = free.next() {
             config.providers[pi].models[mi].slot = n.to_string();
@@ -425,10 +452,10 @@ pub struct FlatEntry {
 }
 
 pub fn flatten_config(config: &Config) -> Vec<FlatEntry> {
-    // 读盘、保存时都规范过；手工构造的配置（单测）没定名字，现补一份，规则相同
+    // 读盘、保存时都规范过；手工构造的配置（单测）没定名字，按老的位置规则现补一份
     if needs_slots(config) {
         let mut normalized = config.clone();
-        normalize_slots(&mut normalized);
+        fill_slots(&mut normalized, SLOT_POOL);
         return flatten_config(&normalized);
     }
     let mut result = Vec::new();
@@ -467,8 +494,11 @@ pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, Reso
     };
 
     let flat = flatten_config(config);
+    // Claude 有时请求带发布日期的完整名（claude-haiku-4-5-20251001），和存下的代号只差日期后缀：
+    // 同一个代号，照它的映射转发。去掉日期还对不上的，照样报未映射
+    let wanted = if flat.iter().any(|e| e.slot == base) { base } else { strip_date_suffix(base).unwrap_or(base) };
     for e in &flat {
-        if base == e.slot {
+        if wanted == e.slot {
             let resolved = if is_1m && !e.to_1m.is_empty() {
                 format!("{}[1m]", e.name)
             } else {
@@ -485,6 +515,12 @@ pub fn resolve_model(model: &str, config: &Config) -> Result<ResolvedModel, Reso
     }
 
     Err(ResolveError::UnmappedSlot(base.to_string()))
+}
+
+/// `claude-sonnet-5-20260101` → `claude-sonnet-5`；末尾不是 `-` 加 8 位数字的返回 None。
+fn strip_date_suffix(name: &str) -> Option<&str> {
+    let (head, tail) = name.rsplit_once('-')?;
+    (tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit())).then_some(head)
 }
 
 #[cfg(test)]
@@ -613,13 +649,42 @@ mod tests {
         v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
 
-    /// 2.2 之前的配置没存名字：补上的正好是原来按位置算出来的那一份，升级后 Claude 里什么都不变。
+    fn stored(cfg: &Config) -> Vec<String> {
+        cfg.providers.iter().flat_map(|p| &p.models).map(|m| m.slot.clone()).collect()
+    }
+
+    /// 2.2 之前应用过的配置没存名字：补上的正好是原来按位置算出来的那一份，升级后 Claude 里什么都不变。
     #[test]
     fn old_configs_keep_the_mapping_they_were_applied_with() {
         let mut cfg = sample_config();
+        cfg.last_applied_at = "1757900000".into();
         normalize_slots(&mut cfg);
-        let stored: Vec<String> = cfg.providers.iter().flat_map(|p| &p.models).map(|m| m.slot.clone()).collect();
-        assert_eq!(stored, SLOT_POOL[..3]);
+        assert_eq!(stored(&cfg), SLOT_POOL[..3]);
+    }
+
+    /// 没应用过的新配置：第一个模型拿 claude-sonnet-5 —— Auto 模式的安全检查优先发给它，
+    /// 这样检查就由主力模型来做。
+    #[test]
+    fn a_fresh_config_puts_the_first_model_on_sonnet_5() {
+        let mut cfg = sample_config();
+        normalize_slots(&mut cfg);
+        assert_eq!(stored(&cfg), SLOT_PREFERENCE[..3]);
+        assert_eq!(cfg.providers[0].models[0].slot, "claude-sonnet-5");
+    }
+
+    /// 应用过、名字也存了，之后新加的模型照新规则拿空位，已有的不动。
+    #[test]
+    fn models_added_after_the_upgrade_use_the_new_order() {
+        let mut cfg = sample_config();
+        cfg.last_applied_at = "1757900000".into();
+        normalize_slots(&mut cfg); // 老映射：opus-5 / sonnet-5 / opus-4-8
+        cfg.providers[0].models.remove(1); // 腾出 sonnet-5
+        cfg.providers[1].models.push(model("model-b2", ""));
+        normalize_slots(&mut cfg);
+        assert_eq!(
+            slots(&cfg),
+            pairs(&[("model-a1", "claude-opus-5"), ("model-b1", "claude-opus-4-8"), ("model-b2", "claude-sonnet-5")])
+        );
     }
 
     /// 删掉前面的模型、在前面的服务商里加模型，别的模型在 Claude 里的名字都不动。
@@ -630,14 +695,14 @@ mod tests {
 
         cfg.providers[0].models.remove(0);
         normalize_slots(&mut cfg);
-        assert_eq!(slots(&cfg), pairs(&[("model-a2", "claude-sonnet-5"), ("model-b1", "claude-opus-4-8")]));
+        assert_eq!(slots(&cfg), pairs(&[("model-a2", "claude-opus-5"), ("model-b1", "claude-opus-4-8")]));
 
-        // 新加的拿能力最强的空位（刚空出来的 opus-5），不是排到最后
+        // 新加的拿排在最前的空位（刚空出来的 sonnet-5），不是排到最后
         cfg.providers[0].models.push(model("model-a3", ""));
         normalize_slots(&mut cfg);
         assert_eq!(
             slots(&cfg),
-            pairs(&[("model-a2", "claude-sonnet-5"), ("model-a3", "claude-opus-5"), ("model-b1", "claude-opus-4-8")])
+            pairs(&[("model-a2", "claude-opus-5"), ("model-a3", "claude-sonnet-5"), ("model-b1", "claude-opus-4-8")])
         );
     }
 
@@ -652,7 +717,7 @@ mod tests {
         normalize_slots(&mut cfg);
         assert_eq!(
             slots(&cfg),
-            pairs(&[("model-a1", "claude-opus-4-7"), ("model-a2", "claude-opus-5"), ("model-b1", "claude-sonnet-5")])
+            pairs(&[("model-a1", "claude-opus-4-7"), ("model-a2", "claude-sonnet-5"), ("model-b1", "claude-opus-5")])
         );
         assert_eq!(cfg.providers[1].models[1].slot, "");
     }
@@ -665,7 +730,7 @@ mod tests {
         cfg.providers[0].models[0].slot = "claude-ml-1".into();
         normalize_slots(&mut cfg);
         let first: Vec<String> = cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect();
-        assert_eq!(first[..8], *SLOT_POOL);
+        assert_eq!(first[..8], *SLOT_PREFERENCE);
         assert_eq!(first[8], "");
         normalize_slots(&mut cfg);
         assert_eq!(cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect::<Vec<_>>(), first);
@@ -677,7 +742,7 @@ mod tests {
         let cfg = sample_config();
         let mut named = cfg.clone();
         normalize_slots(&mut named);
-        assert_eq!(named.providers[0].models[0].slot, "claude-opus-5");
+        assert_eq!(named.providers[0].models[0].slot, "claude-sonnet-5");
         assert_eq!(canonical_hash(&cfg), canonical_hash(&named));
     }
 
@@ -703,7 +768,22 @@ mod tests {
         normalize_slots(&mut cfg);
         cfg.providers[0].models[0].slot = "claude-opus-4-7".into();
         assert_eq!(resolve_model("claude-opus-4-7", &cfg).unwrap().model, "model-a1");
-        assert!(matches!(resolve_model("claude-opus-5", &cfg), Err(ResolveError::UnmappedSlot(_))));
+        assert!(matches!(resolve_model("claude-sonnet-5", &cfg), Err(ResolveError::UnmappedSlot(_))));
+    }
+
+    /// Claude 请求带发布日期的完整名：和存下的代号只差日期，照它的映射转发。
+    #[test]
+    fn resolve_accepts_a_dated_name_of_a_mapped_slot() {
+        let cfg = sample_config(); // 按位置：model-a1 在 claude-opus-5（开着 1M）
+        assert_eq!(resolve_model("claude-opus-5-20260101", &cfg).unwrap().model, "model-a1");
+        assert_eq!(resolve_model("claude-opus-5-20260101[1m]", &cfg).unwrap().model, "model-a1[1m]");
+        // 去掉日期还对不上的照样报未映射，报的是 Claude 请求的原名
+        assert_eq!(
+            resolve_model("claude-haiku-4-5-20251001", &cfg),
+            Err(ResolveError::UnmappedSlot("claude-haiku-4-5-20251001".into()))
+        );
+        // 不是 8 位日期的尾巴不当日期剥
+        assert!(resolve_model("claude-opus-5-2026", &cfg).is_err());
     }
 
     #[test]

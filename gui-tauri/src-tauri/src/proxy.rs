@@ -468,6 +468,28 @@ pub(crate) fn is_title_generation(data: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Auto 模式安全检查的特征串：桌面端自带的 Claude Code（2.1.270 抓包）发检查请求时，系统提示词这样开头。
+const AUTO_MODE_CHECK_PREFIX: &str = "You are a security monitor for autonomous AI coding agents";
+
+/// 日志里给安全检查请求的标记。
+pub(crate) const NOTE_AUTO_MODE_CHECK: &str = "Auto 模式安全检查";
+
+/// 这是不是 Auto 模式的安全检查：每一步有风险的操作前，引擎另发一次请求让模型判断能不能做。
+///
+/// 检查优先发给 claude-sonnet-5，它没映射或出错才改用对话自己的模型 —— 映射到别家服务商时，
+/// 这些请求花的是那一家的钱，用户在 Claude 里完全看不到。只在日志里标出来，不改请求；
+/// 文案哪天改了认不出，也只是少一个标记。
+pub(crate) fn is_auto_mode_check(data: &serde_json::Value) -> bool {
+    let starts = |t: &str| t.trim_start().starts_with(AUTO_MODE_CHECK_PREFIX);
+    match data.get("system") {
+        Some(serde_json::Value::String(s)) => starts(s),
+        Some(serde_json::Value::Array(blocks)) => {
+            blocks.iter().any(|b| b.get("text").and_then(|t| t.as_str()).is_some_and(starts))
+        }
+        _ => false,
+    }
+}
+
 /// 给标题生成用最省的思考设置。返回是否真的改了。
 ///
 /// 桌面端已经明确指定 effort 时不动 —— 与 §3.10「透传优先」同一条原则。
@@ -1026,12 +1048,17 @@ async fn proxy_fallback(
             // §3.3：宁可报错也不静默换一个模型给用户
             Err(ResolveError::UnmappedSlot(slot)) => {
                 eprintln!("  error: 槽位 {} 未映射到任何服务商", slot);
+                let note = if is_auto_mode_check(&data) {
+                    [NOTE_AUTO_MODE_CHECK, "未映射槽位"].join(NOTE_SEPARATOR)
+                } else {
+                    "未映射槽位".to_string()
+                };
                 let id = state.push_log(LogEntry {
                     time: chrono_now(),
                     slot: model.to_string(),
                     model: model.to_string(),
                     status: 400,
-                    note: "未映射槽位".to_string(),
+                    note,
                     error: true,
                     ..Default::default()
                 });
@@ -1056,6 +1083,10 @@ async fn proxy_fallback(
     let (mut thinking_log, title_optimized) =
         prepare_thinking(&mut data, &resolved.thinking_effort);
     let mut notes: Vec<&'static str> = Vec::new();
+    if is_auto_mode_check(&data) {
+        eprintln!("  Auto 模式安全检查");
+        notes.push(NOTE_AUTO_MODE_CHECK);
+    }
     if title_optimized {
         eprintln!("  标题生成：已降到 effort=low + thinking disabled");
         notes.push("标题生成 · 已省思考");
@@ -2177,6 +2208,48 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         assert_eq!(e.usage, Some(Usage { input_tokens: 3, output_tokens: 4, ..Default::default() }));
         assert_eq!(e.cost_usd, None, "没费率就不算 —— 绝不估算");
         assert_eq!(state.today_stats().priced, 0);
+    }
+
+    /// Auto 模式的安全检查在日志里标出来（抓包所见的形态：系统提示词是 block 数组，第一块是计费头）。
+    #[test]
+    fn auto_mode_checks_are_recognised() {
+        let check = serde_json::json!({
+            "model": "claude-sonnet-5", "max_tokens": 64,
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.270; cc_entrypoint=sdk-cli;"},
+                {"type": "text", "text": "You are a security monitor for autonomous AI coding agents.\n\n## Context"}
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "<transcript> "}]}]
+        });
+        assert!(is_auto_mode_check(&check));
+        let as_string = serde_json::json!({"system": "You are a security monitor for autonomous AI coding agents."});
+        assert!(is_auto_mode_check(&as_string));
+        // 普通对话、标题生成都不算
+        let chat = serde_json::json!({"system": [{"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."}]});
+        assert!(!is_auto_mode_check(&chat));
+        assert!(!is_auto_mode_check(&serde_json::json!({"messages": []})));
+    }
+
+    #[tokio::test]
+    async fn an_auto_mode_check_is_tagged_in_the_log() {
+        let upstream = Router::new().fallback(|| async {
+            ([("content-type", "application/json")], r#"{"type":"message","usage":{"input_tokens":3,"output_tokens":1}}"#)
+        });
+        let (state, addr) = proxy_with_upstream(upstream, None).await;
+        direct()
+            .post(format!("{addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"model": "claude-opus-5", "max_tokens": 64,
+                "system": [{"type": "text", "text": "You are a security monitor for autonomous AI coding agents."}],
+                "messages": [{"role": "user", "content": "<transcript>"}]}).to_string())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let e = settled_log(&state).await;
+        assert_eq!((e.status, e.note.as_str()), (200, NOTE_AUTO_MODE_CHECK));
     }
 
     #[tokio::test]

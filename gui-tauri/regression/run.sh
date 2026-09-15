@@ -25,8 +25,11 @@ NEW_BIN="${NEW_BIN:?set NEW_BIN to the v2 binary}"
 
 mk_home() {
   rm -rf "$1"; mkdir -p "$1/.claude-model-proxy" "$1/Library/LaunchAgents"
+  # last_applied_at：当成「以前应用过、没存 Claude 名字」的老配置 —— 新版按老的位置顺序补名字，
+  # 和 v1 的映射逐条对得上（没应用过的新配置，第一个模型会拿 claude-sonnet-5）
   cat > "$1/.claude-model-proxy/config.json" <<'EOF'
 {
+  "last_applied_at": "1700000000",
   "providers": [
     {"target_url": "http://127.0.0.1:9999", "api_key": "test-key", "models": [{"name": "real-a", "to_1m": "auto"}], "thinking_effort": ""},
     {"target_url": "http://127.0.0.1:9999/sub", "api_key": "test-key-2", "models": [{"name": "real-b", "to_1m": ""}], "thinking_effort": "off"},

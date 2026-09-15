@@ -371,32 +371,28 @@ POOL = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7"
 o = json.load(open(eq / "out-old" / "models.json"))["data"]
 n = json.load(open(eq / "out-new" / "models.json"))["data"]
 fails = 0
-# v1 封顶 8 个模型、新版 20（§3.6 有意扩容）→ 只比对 v1 能表达的那一段
+# v1 和新版都封顶 8 个模型（2.1 曾扩到 20，2.2 收回：Claude 认得的真名只有 8 个）
 o_names = [m["display_name"] for m in o]
 n_names = [m["display_name"] for m in n]
-if n_names[: len(o_names)] != o_names:
-    print("✗ 前 8 个槽位的映射顺序与 v1 不一致")
-    print(f"    old={o_names}\n    new={n_names[: len(o_names)]}")
+if n_names != o_names:
+    print("✗ 映射顺序与 v1 不一致")
+    print(f"    old={o_names}\n    new={n_names}")
     fails += 1
-elif len(n_names) <= len(o_names):
-    print(f"✗ 新版没有超出 v1 的 8 槽位上限（{len(n_names)} 条）"); fails += 1
 else:
-    print(f"✓ 前 {len(o_names)} 条映射与 v1 一致，且已扩到 {len(n_names)} 条")
+    print(f"✓ {len(o_names)} 条映射与 v1 一致")
 for m in n:
     slot = m["id"].removesuffix("[1m]")
-    if slot not in POOL and not slot.startswith("claude-ml-"):
+    if slot not in POOL:
         print(f"✗ 槽位 {slot} 不在 2.1 槽位池里"); fails += 1
 if not fails:
     print("✓ 槽位全部来自 2.1 新池子")
 
-# §3.6 溢出层：配置里有 22 个模型，应当正好取前 20 个，第 9 个起走 claude-ml-{n}
+# 配置里有 22 个模型：应当正好取前 8 个，全是 Claude 认得的真名，不再有 claude-ml-{n} 占位名
 slots = [m["id"] for m in n if not m["id"].endswith("[1m]")]
-if len(slots) != 20:
-    print(f"✗ 应封顶 20 个槽位，实得 {len(slots)}"); fails += 1
-elif slots[:8] != POOL or slots[8] != "claude-ml-1" or slots[19] != "claude-ml-12":
-    print(f"✗ 溢出层分配不对: {slots}"); fails += 1
+if slots != POOL:
+    print(f"✗ 应正好是池子里的 8 个名字，实得 {slots}"); fails += 1
 else:
-    print("✓ 封顶 20 槽位，第 9 个起走 claude-ml-{n} 溢出层")
+    print("✓ 封顶 8 个，全部是 Claude 认得的真名")
 sys.exit(1 if fails else 0)
 PY
 then :; else fail=1; fi
@@ -445,7 +441,7 @@ for rel, is_gateway in cases:
             side.setdefault("inferenceModels", [])
         if len(o["inferenceModels"]) == len(n["inferenceModels"]):
             for m in n["inferenceModels"]:
-                if m.get("name") not in POOL and not str(m.get("name")).startswith("claude-ml-"):
+                if m.get("name") not in POOL:
                     print(f"✗ {rel}: 槽位 {m.get('name')} 不在 2.1 槽位池里"); fails += 1
             o["inferenceModels"] = n["inferenceModels"] = "<按顺序对齐后忽略槽位名>"
         for k in PRICING_KEYS_MUST_BE_ABSENT:

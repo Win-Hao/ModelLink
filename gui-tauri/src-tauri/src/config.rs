@@ -16,8 +16,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 2.1-B §3.6：8 → 20。官方 `inferenceModels` 上限是 200 条，20 留足余量。
-pub const MAX_MODELS: usize = 20;
+/// 最多写进 Claude 的模型数 = [`SLOT_POOL`] 里的名字数。
+///
+/// 2.1-B 曾放到 20：第 9 个起用自己编的占位名 `claude-ml-{n}`。但 Claude 真正认得的只有池子里这 8 个 ——
+/// 占位名不能调思考、Auto 模式也没实测，界面上「能加 20 个」和「能换的名字只有 8 个」对不上，
+/// 实际也用不到这么多。2.2 收回到 8（作者拍板）。
+pub const MAX_MODELS: usize = SLOT_POOL.len();
 
 /// 槽位池（§2.1）。顺序即新模型默认拿名字的先后 —— Claude 按**模型 ID 精确匹配**
 /// 决定这个模型在 Claude 里能用什么，排在前面的更全：
@@ -61,33 +65,11 @@ pub const SLOT_POOL: &[&str] = &[
 /// 换池子时存着的旧名字不会自动换掉 —— 要连同迁移一起想。
 pub const SLOT_POOL_VERSION: &str = "2.1";
 
-/// 名字表里第 `index` 个（0-based）。池子用完后走 `claude-ml-{n}` 溢出层：
-/// 无 effort 选择器的纯占位名，可无限扩，且含 "claude" 能过桌面端的名字过滤器（§1.3）。
-pub fn slot_id(index: usize) -> String {
-    match SLOT_POOL.get(index) {
-        Some(id) => (*id).to_string(),
-        None => format!("claude-ml-{}", index - SLOT_POOL.len() + 1),
-    }
-}
-
-/// 能写进 Claude 的全部名字：先是 [`SLOT_POOL`]，再是溢出层，共 [`MAX_MODELS`] 个。
-/// 顺序就是新模型默认拿名字的先后。
-pub fn slot_names() -> Vec<String> {
-    (0..MAX_MODELS).map(slot_id).collect()
-}
-
-fn is_slot_name(s: &str) -> bool {
-    SLOT_POOL.contains(&s)
-        || s.strip_prefix("claude-ml-")
-            .and_then(|n| n.parse::<usize>().ok())
-            .is_some_and(|n| (1..=MAX_MODELS - SLOT_POOL.len()).contains(&n))
-}
-
 /// 会写进 Claude 的模型里，有没有名字没定下来的（空、认不出、和前面重复）。
 fn needs_slots(config: &Config) -> bool {
     let mut seen: Vec<&str> = Vec::new();
     for m in config.providers.iter().flat_map(|p| &p.models).filter(|m| !m.name.is_empty()).take(MAX_MODELS) {
-        if !is_slot_name(&m.slot) || seen.contains(&m.slot.as_str()) {
+        if !SLOT_POOL.contains(&m.slot.as_str()) || seen.contains(&m.slot.as_str()) {
             return true;
         }
         seen.push(&m.slot);
@@ -102,7 +84,7 @@ fn needs_slots(config: &Config) -> bool {
 /// 现在名字存在 [`ModelEntry::slot`]，增删不挪别人的；用户在服务商页可以换（换到被占的名字就互换）。
 ///
 /// - 已经定下、认得出、没和前面重复的：原样保留
-/// - 其余有名字的（新加的、2.2 之前的老配置）：按 [`slot_names`] 的顺序拿第一个空着的。
+/// - 其余有名字的（新加的、2.2 之前的老配置）：按 [`SLOT_POOL`] 的顺序拿第一个空着的。
 ///   老配置一个都没存过，拿到的正好就是原来按位置算出来的那一份 —— 升级后 Claude 里什么都不变
 /// - 没名字的行、超出 [`MAX_MODELS`] 的：不占名字
 pub fn normalize_slots(config: &mut Config) {
@@ -116,16 +98,16 @@ pub fn normalize_slots(config: &mut Config) {
                 continue;
             }
             count += 1;
-            if !(is_slot_name(&m.slot) && used.insert(m.slot.clone())) {
+            if !(SLOT_POOL.contains(&m.slot.as_str()) && used.insert(m.slot.clone())) {
                 m.slot.clear();
                 waiting.push((pi, mi));
             }
         }
     }
-    let mut free = slot_names().into_iter().filter(|n| !used.contains(n));
+    let mut free = SLOT_POOL.iter().filter(|n| !used.contains(**n));
     for (pi, mi) in waiting {
         if let Some(n) = free.next() {
-            config.providers[pi].models[mi].slot = n;
+            config.providers[pi].models[mi].slot = n.to_string();
         }
     }
 }
@@ -558,20 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn slot_id_falls_through_to_overflow_layer() {
-        assert_eq!(slot_id(0), "claude-opus-5");
-        assert_eq!(slot_id(7), "claude-haiku-4-5");
-        // 第 9 个模型起走溢出层，从 1 开始编号
-        assert_eq!(slot_id(8), "claude-ml-1");
-        assert_eq!(slot_id(19), "claude-ml-12");
-    }
-
-    #[test]
-    fn overflow_slots_survive_the_name_filter() {
+    fn slot_names_survive_the_name_filter() {
         // §1.3：模型名必须含 claude|opus|sonnet|haiku|fable|mythos|anthropic
         // 之一，否则 Claude Desktop 的名字过滤器会把整条删掉
-        for i in 0..MAX_MODELS {
-            let id = slot_id(i);
+        for id in SLOT_POOL {
             assert!(
                 ["claude", "opus", "sonnet", "haiku", "fable", "mythos", "anthropic"]
                     .iter()
@@ -582,19 +554,18 @@ mod tests {
         }
     }
 
+    /// 2.2 收回到 8 个：只写 Claude 认得的真名，不再有 claude-ml-{n} 占位名。
     #[test]
-    fn flatten_caps_at_twenty_and_uses_overflow_slots() {
-        let models: Vec<ModelEntry> = (0..25).map(|i| model(&format!("m{i}"), "")).collect();
+    fn flatten_caps_at_the_eight_real_names() {
+        let models: Vec<ModelEntry> = (0..10).map(|i| model(&format!("m{i}"), "")).collect();
         let cfg = Config {
             providers: vec![provider("https://a.example.com", "k", models, "")],
             ..Default::default()
         };
         let flat = flatten_config(&cfg);
-        assert_eq!(flat.len(), 20);
-        assert_eq!(flat[0].slot, "claude-opus-5");
-        assert_eq!(flat[7].slot, "claude-haiku-4-5");
-        assert_eq!(flat[8].slot, "claude-ml-1");
-        assert_eq!(flat[19].slot, "claude-ml-12");
+        assert_eq!(MAX_MODELS, 8);
+        assert_eq!(flat.len(), 8);
+        assert_eq!(flat.iter().map(|e| e.slot.as_str()).collect::<Vec<_>>(), SLOT_POOL);
     }
 
     // ---- flatten_config ----
@@ -648,7 +619,7 @@ mod tests {
         let mut cfg = sample_config();
         normalize_slots(&mut cfg);
         let stored: Vec<String> = cfg.providers.iter().flat_map(|p| &p.models).map(|m| m.slot.clone()).collect();
-        assert_eq!(stored, (0..3).map(slot_id).collect::<Vec<_>>());
+        assert_eq!(stored, SLOT_POOL[..3]);
     }
 
     /// 删掉前面的模型、在前面的服务商里加模型，别的模型在 Claude 里的名字都不动。
@@ -686,15 +657,16 @@ mod tests {
         assert_eq!(cfg.providers[1].models[1].slot, "");
     }
 
-    /// 溢出层的名字认得出，再规范一次不会被换掉；第 21 个模型不占名字（本来就不写进 Claude）。
+    /// 第 9 个模型不占名字（本来就不写进 Claude）；2.1 留下的 claude-ml-{n} 当作认不出，换成真名。
     #[test]
-    fn overflow_names_are_kept_and_the_21st_model_gets_none() {
-        let models: Vec<ModelEntry> = (0..21).map(|i| model(&format!("m{i}"), "")).collect();
+    fn models_past_the_cap_get_no_name() {
+        let models: Vec<ModelEntry> = (0..9).map(|i| model(&format!("m{i}"), "")).collect();
         let mut cfg = Config { providers: vec![provider("https://a.example.com", "k", models, "")], ..Default::default() };
+        cfg.providers[0].models[0].slot = "claude-ml-1".into();
         normalize_slots(&mut cfg);
         let first: Vec<String> = cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect();
-        assert_eq!(first[19], "claude-ml-12");
-        assert_eq!(first[20], "");
+        assert_eq!(first[..8], *SLOT_POOL);
+        assert_eq!(first[8], "");
         normalize_slots(&mut cfg);
         assert_eq!(cfg.providers[0].models.iter().map(|m| m.slot.clone()).collect::<Vec<_>>(), first);
     }

@@ -34,7 +34,7 @@ pub const MAX_MODELS: usize = SLOT_POOL.len();
 /// | sonnet-4-5 / haiku-4-5 | 无 | extended | 没有 |
 ///
 /// 档位和思考模式来自桌面端的硬编码表（`Vwt`）。Auto 模式来自桌面端自带的 Claude Code 引擎
-/// （2.1.260 的 `Foe`）：claude-3-*、opus-4-0/4-1/4-5、sonnet-4-0/4-5、haiku-4-5 一律没有；
+/// （2.1.260 核实、2.1.270 复核未变，design-2.1 §七⑧）：claude-3-*、opus-4-0/4-1/4-5、sonnet-4-0/4-5、haiku-4-5 一律没有；
 /// 不是官方直连时，opus-4-6、sonnet-4-6 和所有 haiku 也没有。「思考模式 auto」和 Auto 模式是两回事。
 ///
 /// 换掉 2.0 的 8 个 legacy 槽位（`claude-3-opus-latest` 等）—— 那些一个都不在 `Vwt` 表里，

@@ -833,7 +833,7 @@ effort 的投机分支排最后」，并单独钉了测试。
   `*` 关掉网络沙箱，但网页抓取仍挡内网地址
 - 遥测两项 `disableEssentialTelemetry` / `disableNonessentialTelemetry` 在 3p 下默认就是开（已屏蔽），不用写
 
-**哪些模型名有 Auto 模式**（2026-09-15，桌面端 1.49585.0 自带的 Claude Code 2.1.260 核实）。
+**哪些模型名有 Auto 模式**（2026-09-15，桌面端 1.49585.0 自带的 Claude Code 2.1.260 核实；同日升级到 1.52386.6 / Claude Code 2.1.270 复核未变）。
 判断在引擎的 `Foe(model)`，桌面端的权限选项据此置灰（实测 claude-sonnet-4-6 上「Automatically approve」是灰的）：
 
 ```js
@@ -851,6 +851,13 @@ return true   // bP = anthropicAws || anthropicGoogleCloud；网关是 "gateway"
 | claude-ml-N（溢出层，2.2 起不再使用） | 按代码是有（不在排除名单里），**没实测** | 无 | — |
 
 - 表里的「思考模式 auto / extended」是思考方式（adaptive / 固定预算），和 Auto 权限模式是两回事。
+- 引擎是压缩过的，函数名每一版都变（2.1.270 里拆成了 `fae` + `Xce`）。复核时别按函数名搜，
+  按排除名单里的字面量搜，比如 `==="claude-sonnet-4-6"||`。
+
+**升级到 1.52386.6 的复核**（2026-09-15）：ModelLink 写的键、一键 Winhao 配置的 15 个开关，
+键名、类型、取值范围、默认值、起始版本全部未变；1.49585.0 之后没有新加任何配置键；档位表、fable/mythos 规则、
+「暂不可用」名单（仍为空）未变；排期中的弃用项没有一个涉及 ModelLink 写的值（鉴权方式固定写 `bearer`，
+`sso` / `auto` 按原计划 2026-10-07 停止支持）。Claude 启动日志：`ConfigHealth healthy`、`picker = 5`。
 - 名字里带 fable / mythos 的（正则 `^(?:claude-)?(?:fable|mythos)(?:-|$)`）桌面端一律给 5 档 + auto 思考，
   引擎也不排除 Auto 模式，看起来能无限扩。**但不能拿来当映射名**：桌面端专门留了一份「暂不可用」名单
   （`qTt`，这个版本是空的，配套链接 fable-mythos-access），引擎对 Fable 还有额度检查和拒答回退逻辑。

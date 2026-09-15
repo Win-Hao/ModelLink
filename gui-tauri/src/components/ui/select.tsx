@@ -69,7 +69,7 @@ function SelectContent({
         align={align}
         {...props}
       >
-        <SelectScrollUpButton />
+        {/* 不放上下滚动箭头：滚到顶或底时箭头一出一收，整个列表会跳一下。列表本身能直接滚 */}
         <SelectPrimitive.Viewport
           className={cn(
             "p-[5px]",
@@ -79,7 +79,6 @@ function SelectContent({
         >
           {children}
         </SelectPrimitive.Viewport>
-        <SelectScrollDownButton />
       </SelectPrimitive.Content>
     </SelectPrimitive.Portal>
   )

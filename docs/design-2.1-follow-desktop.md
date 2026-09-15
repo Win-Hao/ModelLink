@@ -232,7 +232,7 @@ UI：模型编辑器加「层级」下拉（可留空）。
 
 ### 3.6 放开 8 个上限 + 换 slot 池（⭐⭐）
 
-- `MAX_MODELS: 8 → 20`
+- `MAX_MODELS: 8 → 20`（2.2 又收回到 8，占位名层删掉，见 design-2.2 §6.2）
 - `ANTHROPIC_SLOTS` → `SLOT_POOL`（§2.1），溢出走 `claude-ml-{n}`
 - `flatten_config` 分配逻辑相应调整
 
@@ -848,7 +848,7 @@ return true   // bP = anthropicAws || anthropicGoogleCloud；网关是 "gateway"
 | claude-opus-4-6 | 没有 | 4 档 | extended |
 | claude-sonnet-4-6 | 没有 | 4 档 | auto |
 | claude-sonnet-4-5 / claude-haiku-4-5 | 没有 | 无 | extended |
-| claude-ml-N（溢出层） | 按代码是有（不在排除名单里），**没实测** | 无 | — |
+| claude-ml-N（溢出层，2.2 起不再使用） | 按代码是有（不在排除名单里），**没实测** | 无 | — |
 
 - 表里的「思考模式 auto / extended」是思考方式（adaptive / 固定预算），和 Auto 权限模式是两回事。
 - 名字里带 fable / mythos 的（正则 `^(?:claude-)?(?:fable|mythos)(?:-|$)`）桌面端一律给 5 档 + auto 思考，

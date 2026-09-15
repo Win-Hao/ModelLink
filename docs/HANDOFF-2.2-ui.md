@@ -88,7 +88,7 @@ cd src-tauri && cargo clippy --all-targets   # 必须零告警
 - 引导页预设格子显示真实域名（两个百炼靠 `coding.` / `token-plan.` 前缀区分）。
 
 **浏览器预览**：`npx vite` 后打开 `http://localhost:1420/`，devPreview 支持
-`?empty` `?dirty` `?many`（20 个模型）`?portdown` `?unpricedcfg`（有模型没费率）`?latestart`。
+`?empty` `?dirty` `?many`（20 个模型，看超出 8 个上限的提示）`?portdown` `?unpricedcfg`（有模型没费率）`?latestart`。
 
 ## 还没做的
 

@@ -2,54 +2,60 @@
 <html>
 <head>
 <meta charset="utf-8">
+<!--
+  DMG 窗口背景（660×400，窗口 660×428 含标题栏）。颜色取 2.2 深色 token（src/index.css），
+  字体与应用一致：Archivo（拉丁）+ PingFang SC（中文）。
+  出图：在 gui-tauri 目录起静态服务（file:// 下 Chrome 不给加载字体），
+  按 1x / 2x 各截一张，再用 tiffutil 合成 background.tiff —— Retina 屏上字才不糊：
+    tiffutil -cathidpicheck bg.png bg@2x.png -out src-tauri/dmg/background.tiff
+  图标位置由 tauri.conf.json 的 appPosition(180,240) / applicationFolderPosition(480,240) 决定，动布局要两边对齐。
+-->
 <style>
   @font-face {
-    font-family: "Outfit";
-    src: url("./outfit-latin.woff2") format("woff2");
+    font-family: "Archivo";
+    src: url("../../src/assets/fonts/archivo-latin.woff2") format("woff2");
     font-weight: 400 700;
   }
   * { margin: 0; box-sizing: border-box; }
   html, body { width: 660px; height: 400px; overflow: hidden; }
   body {
-    font-family: "Outfit", -apple-system, "PingFang SC", sans-serif;
-    background:
-      radial-gradient(120% 90% at 50% 30%, #232427 0%, #1B1C1F 55%, #151619 100%);
+    font-family: "Archivo", "PingFang SC", -apple-system, sans-serif;
+    background: radial-gradient(120% 90% at 50% 28%, #1e1c1a 0%, #151413 55%, #0d0c0b 100%);
     position: relative;
+    -webkit-font-smoothing: antialiased;
   }
-  /* 品牌字标：Model 白 + Link 陶土（对齐 ClaudeCN 的 白+橙 拆分） */
+  /* 品牌字标：Model 暖白 + Link 陶土（沿用 2.0 的双色拆分，换成 2.2 的字与色） */
   .brand {
-    position: absolute; top: 62px; left: 0; right: 0;
+    position: absolute; top: 58px; left: 0; right: 0;
     text-align: center;
-    font-size: 44px; font-weight: 700; letter-spacing: -0.5px;
-    color: #F5F3EE;
+    font-size: 42px; font-weight: 700; letter-spacing: -0.03em;
+    color: #efedec;
   }
-  .brand b { color: #E27B54; font-weight: 700; }
+  .brand b { color: #df825f; font-weight: 700; }
   .tagline {
-    position: absolute; top: 118px; left: 0; right: 0;
+    position: absolute; top: 116px; left: 0; right: 0;
     text-align: center;
-    font-size: 12.5px; letter-spacing: 3px;
-    color: #8B8A88;
-    font-weight: 400;
+    font-family: "PingFang SC", sans-serif;
+    font-size: 13px; letter-spacing: 0.04em;
+    color: #8e8c89;
   }
-  /* 拖拽面板：圆角浅面板，装 app 与 Applications 两个图标位 */
+  /* 拖拽面板：装 app 与「应用程序」两个图标位 */
   .panel {
     position: absolute; left: 40px; right: 40px; top: 152px; height: 196px;
-    background: rgba(255, 255, 255, 0.075);
-    border-radius: 28px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.045);
+    border-radius: 24px;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
   }
-  /* 双箭头：位于两图标（180,240）与（480,240）正中 */
-  .chev {
-    position: absolute; top: 218px; left: 0; right: 0;
-    text-align: center;
-    color: #D97757;
-    font-size: 34px; font-weight: 700; line-height: 1;
+  /* 箭头：两图标（180,240）与（480,240）正中 */
+  .arrow {
+    position: absolute; top: 222px; left: 50%; width: 40px; height: 36px; margin-left: -20px;
   }
   .hint {
-    position: absolute; top: 274px; left: 0; right: 0;
+    position: absolute; top: 272px; left: 0; right: 0;
     text-align: center;
-    font-size: 11px; letter-spacing: 2px;
-    color: #77767A;
+    font-family: "PingFang SC", sans-serif;
+    font-size: 12px; letter-spacing: 0.04em;
+    color: #8e8c89;
   }
 </style>
 </head>
@@ -57,7 +63,9 @@
   <div class="brand">Model<b>Link</b></div>
   <div class="tagline">把国产大模型接入 Claude Desktop</div>
   <div class="panel"></div>
-  <div class="chev">&#187;</div>
-  <div class="hint">拖拽至</div>
+  <svg class="arrow" viewBox="0 0 40 36" fill="none" stroke="#df825f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 18h26M22 7l11 11-11 11" />
+  </svg>
+  <div class="hint">拖到右边，完成安装</div>
 </body>
 </html>

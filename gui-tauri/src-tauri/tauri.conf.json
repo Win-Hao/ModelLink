@@ -46,7 +46,7 @@
       "hardenedRuntime": true,
       "entitlements": "entitlements.plist",
       "dmg": {
-        "background": "dmg/background.png",
+        "background": "dmg/background.tiff",
         "windowSize": {
           "width": 660,
           "height": 428

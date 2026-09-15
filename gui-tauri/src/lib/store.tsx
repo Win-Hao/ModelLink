@@ -31,6 +31,7 @@ import {
   diffApplied,
   flattenModels,
   matchPreset,
+  normalizeSlots,
   totalModelsRaw,
   type Preset,
 } from "@/lib/presets";
@@ -172,6 +173,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     if (configQuery.data && draftRef.current === null) {
       const cfg = structuredClone(configQuery.data);
       cfg.providers ??= [];
+      normalizeSlots(cfg);
       setDraft(cfg);
       configHash(cfg)
         .then((h) =>
@@ -210,6 +212,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         if (!prev) return prev;
         const next = structuredClone(prev);
         fn(next);
+        // 加了、删了、改名了模型之后，把 Claude 里的名字理顺（新模型拿能力最强的空位，别的不动）
+        normalizeSlots(next);
         return next;
       });
       setApplyError(null);

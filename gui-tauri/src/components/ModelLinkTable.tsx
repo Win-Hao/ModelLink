@@ -118,7 +118,7 @@ export function ModelLinkTable() {
                 title={
                   row.efforts.length > 0
                     ? `在 Claude 里可以选 ${row.efforts.length} 档思考深度`
-                    : "Claude 只给排在前面的 6 个模型提供思考深度选择"
+                    : "它在 Claude 里用的名字不能调思考深度，可以在服务商页换一个"
                 }
               >
                 {row.efforts.length > 0 ? `可调 · ${row.efforts.length} 档` : "不可调"}

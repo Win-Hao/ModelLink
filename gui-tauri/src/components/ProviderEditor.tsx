@@ -28,6 +28,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -37,6 +38,7 @@ import { availableModels, desktopInfo, type ModelEntry } from "@/lib/ipc";
 import {
   MAX_MODELS,
   ONE_M_CONTEXT,
+  SLOT_POOL,
   THINKING_LABELS,
   flattenModels,
   formatContext,
@@ -45,6 +47,7 @@ import {
   keyPagesFor,
   modelOptions,
   providerDisplayName,
+  slotAbility,
   totalModelsRaw,
 } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
@@ -207,10 +210,20 @@ export function ProviderEditor({ index }: { index: number }) {
         ? "这家服务商没有现成的清单，在上面直接输入模型名"
         : `${name} 的常用模型 · 还没从 models.dev 同步到最新清单`;
 
-  // 槽位以真实展开结果为准（跳过没填名字的行、封顶 MAX_MODELS），不按行号推
+  // 在 Claude 里的名字以真实展开结果为准（跳过没填名字的行、封顶 MAX_MODELS）
   const flat = flattenModels(draft);
   const mine = flat.filter((f) => f.providerIndex === index);
   const withoutPicker = mine.filter((f) => f.efforts.length === 0).length;
+  const holders = new Map(flat.map((f) => [f.slot, f.name]));
+
+  // 换到别的模型正在用的名字：两个互换，不用先去改另一个腾位置
+  const chooseSlot = (mi: number, slot: string) =>
+    updateDraft((c) => {
+      const me = c.providers[index].models[mi];
+      const holder = c.providers.flatMap((pv) => pv.models).find((x) => x !== me && x.name && x.slot === slot);
+      if (holder) holder.slot = me.slot;
+      me.slot = slot;
+    });
 
   const runTest = async () => {
     if (!p.target_url || !p.api_key || !p.models.some((m) => m.name)) {
@@ -390,23 +403,52 @@ export function ProviderEditor({ index }: { index: number }) {
                 </span>
                 <span className={cn(COL.slot, "text-[12.5px] text-fg2")}>
                   {slot ? (
-                    <span
-                      className="truncate"
-                      title={
-                        slot.efforts.length > 0
-                          ? `Claude 内部用的名字：${slot.slot}`
-                          : `Claude 只给排在前面的 6 个模型提供思考深度选择。Claude 内部用的名字：${slot.slot}`
-                      }
-                    >
-                      {slot.efforts.length > 0 ? `可调思考深度 · ${slot.efforts.length} 档` : (
-                        <span className="text-fg3">不可调思考深度</span>
-                      )}
+                    <>
+                      {/* 能用什么由 Claude 按名字决定：Auto 模式、思考档位。下拉里直接写后果，名字放小字 */}
+                      <Select value={slot.slot} onValueChange={(v) => chooseSlot(mi, v)}>
+                        <SelectTrigger
+                          size="sm"
+                          className="max-w-full min-w-0"
+                          title={`Claude 内部用的名字：${slot.slot}`}
+                          aria-label={`${m.name} 在 Claude 里用的名字`}
+                        >
+                          <SelectValue>
+                            <span className={cn("truncate", slot.efforts.length === 0 && "text-fg3")}>
+                              {slotAbility(slot.slot)}
+                            </span>
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent position="popper" align="start" className="w-[320px]">
+                          {[
+                            ...SLOT_POOL.map((s) => s.id),
+                            // 溢出层的名字彼此没区别，只列它自己正在用的那个
+                            ...(SLOT_POOL.some((s) => s.id === slot.slot) ? [] : [slot.slot]),
+                          ].map((s) => {
+                            const holder = s !== slot.slot ? holders.get(s) : undefined;
+                            return (
+                              <SelectItem key={s} value={s} className="h-auto py-[5px]">
+                                <span className="flex min-w-0 flex-col items-start gap-px">
+                                  <span>{slotAbility(s)}</span>
+                                  <span className="text-[11.5px] text-fg3">
+                                    <span className="mono">{s}</span>
+                                    {holder && ` · 和「${holder}」互换`}
+                                  </span>
+                                </span>
+                              </SelectItem>
+                            );
+                          })}
+                          <SelectSeparator />
+                          <p className="px-[9px] py-1.5 text-[11.5px] leading-[1.5] text-balance text-fg3">
+                            应用之后，Claude 里正选着这个名字的对话会换成新的模型。
+                          </p>
+                        </SelectContent>
+                      </Select>
                       {slotShown && (
-                        <span className="text-fg3">
-                          {" "}· 显示为 <span className="mono text-fg2">{slot.slot}</span>
+                        <span className="truncate text-fg3">
+                          显示为 <span className="mono text-fg2">{slot.slot}</span>
                         </span>
                       )}
-                    </span>
+                    </>
                   ) : m.name ? (
                     // 超出 20 个的模型不会写进 Claude —— 说出来，别让它静默消失
                     <span className="truncate text-[12px] text-danger">超出 {MAX_MODELS} 个上限，不会出现在 Claude 里</span>

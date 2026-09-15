@@ -1,5 +1,5 @@
 import { MODELS_SNAPSHOT } from "@/lib/modelsSnapshot";
-import type { AppliedModel, AvailableModel, Config } from "@/lib/ipc";
+import type { AppliedModel, AvailableModel, Config, ModelEntry } from "@/lib/ipc";
 
 // ============================================================
 // 服务商预设与槽位常量 —— 数据自 v1 ui.html:272-360 平移，勿改。
@@ -43,36 +43,88 @@ export const KEY_FEATURE_NAMES: Record<string, string> = {
 export const SLOT_POOL_VERSION = "2.1";
 
 /**
- * 槽位池（§2.1），镜像后端 config.rs::SLOT_POOL，顺序即分配优先级。
+ * 能写进 Claude 的名字（§2.1），镜像后端 config.rs::SLOT_POOL，顺序即新模型默认拿名字的先后。
  *
- * `efforts` 是 **Claude Desktop 自己**那张按模型 ID 精确匹配的硬编码表（Vwt）里的档位，
- * 只用来在界面上告诉用户「这个模型在 Claude 里能不能调推理强度」。
+ * 只用来在界面上告诉用户「这个模型在 Claude 里能用什么」：
+ * - `efforts`：**Claude Desktop 自己**那张按模型 ID 精确匹配的硬编码表（Vwt）里的思考档位
+ * - `auto`：走网关时有没有 Auto 模式（桌面端自带的 Claude Code 引擎按名字判断，见 config.rs::SLOT_POOL）
+ *
  * ⚠️ 它决定的只是桌面端的选择器 UI —— 发给上游的参数一律不得从槽位名推断（§3.11.5）。
  */
-export type Slot = { id: string; efforts: string[] };
+export type Slot = { id: string; efforts: string[]; auto: boolean };
 
 export const SLOT_POOL: Slot[] = [
-  // 一线：5 档 effort + auto 模式
-  { id: "claude-opus-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  { id: "claude-sonnet-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  { id: "claude-opus-4-8", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  { id: "claude-opus-4-7", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  // 二线：4 档
-  { id: "claude-opus-4-6", efforts: ["low", "medium", "high", "max"] },
-  { id: "claude-sonnet-4-6", efforts: ["low", "medium", "high", "max"] },
-  // 三线：仅 extended 模式，无 effort 选择器
-  { id: "claude-sonnet-4-5", efforts: [] },
-  { id: "claude-haiku-4-5", efforts: [] },
+  // 一线：Auto 模式 + 5 档思考
+  { id: "claude-opus-5", efforts: ["low", "medium", "high", "xhigh", "max"], auto: true },
+  { id: "claude-sonnet-5", efforts: ["low", "medium", "high", "xhigh", "max"], auto: true },
+  { id: "claude-opus-4-8", efforts: ["low", "medium", "high", "xhigh", "max"], auto: true },
+  { id: "claude-opus-4-7", efforts: ["low", "medium", "high", "xhigh", "max"], auto: true },
+  // 二线：4 档思考，没有 Auto 模式
+  { id: "claude-opus-4-6", efforts: ["low", "medium", "high", "max"], auto: false },
+  { id: "claude-sonnet-4-6", efforts: ["low", "medium", "high", "max"], auto: false },
+  // 三线：不能调思考，没有 Auto 模式
+  { id: "claude-sonnet-4-5", efforts: [], auto: false },
+  { id: "claude-haiku-4-5", efforts: [], auto: false },
 ];
 
-/** 第 n 个模型（0-based）占的槽位；池子用完走 claude-ml-{n} 溢出层（无选择器）。 */
-export function slotId(index: number): string {
-  return SLOT_POOL[index]?.id ?? `claude-ml-${index - SLOT_POOL.length + 1}`;
+/** 能写进 Claude 的全部名字（镜像 config.rs::slot_names）：先是池子，再是 claude-ml-1 起的溢出层。 */
+export const SLOT_NAMES: readonly string[] = [
+  ...SLOT_POOL.map((s) => s.id),
+  ...Array.from({ length: MAX_MODELS - SLOT_POOL.length }, (_, i) => `claude-ml-${i + 1}`),
+];
+
+/**
+ * 这个名字在 Claude 里能用什么。溢出层的名字不在桌面端的表里，不能调思考；
+ * 有没有 Auto 模式还没实测过（`null`），界面上不说。
+ */
+export function slotInfo(slot: string): { efforts: string[]; auto: boolean | null } {
+  const s = SLOT_POOL.find((x) => x.id === slot);
+  return s ? { efforts: s.efforts, auto: s.auto } : { efforts: [], auto: null };
 }
 
-/** 该槽位在 Claude Desktop 里有几档推理强度可选（0 = 不显示选择器）。 */
-export function slotEfforts(index: number): string[] {
-  return SLOT_POOL[index]?.efforts ?? [];
+/** 一句话说这个名字在 Claude 里能用什么（服务商页「在 Claude 里」那一列、换名字的下拉）。 */
+export function slotAbility(slot: string): string {
+  const { efforts, auto } = slotInfo(slot);
+  const think = efforts.length > 0 ? `思考 ${efforts.length} 档` : "思考不能调";
+  return auto === true ? `Auto 模式 · ${think}` : auto === false ? `没有 Auto 模式 · ${think}` : think;
+}
+
+/** 会写进 Claude 的模型：有名字的前 MAX_MODELS 个。 */
+function namedModels(config: Config): ModelEntry[] {
+  return config.providers.flatMap((p) => p.models).filter((m) => m.name).slice(0, MAX_MODELS);
+}
+
+function needsSlots(config: Config): boolean {
+  const seen = new Set<string>();
+  return namedModels(config).some((m) => {
+    if (!m.slot || !SLOT_NAMES.includes(m.slot) || seen.has(m.slot)) return true;
+    seen.add(m.slot);
+    return false;
+  });
+}
+
+/**
+ * 给会写进 Claude 的模型定下名字，就地改（镜像 config.rs::normalize_slots）。
+ * 认得出、没重复的原样保留；其余有名字的按能力从高到低拿第一个空位；没名字的行、超出上限的不占名字。
+ * 增删模型都不挪别人的 —— Claude 里选着某个名字的对话，不会悄悄换成别的模型。
+ */
+export function normalizeSlots(config: Config): void {
+  const named = new Set(namedModels(config));
+  const used = new Set<string>();
+  const waiting: ModelEntry[] = [];
+  for (const m of config.providers.flatMap((p) => p.models)) {
+    if (!named.has(m)) {
+      delete m.slot;
+    } else if (m.slot && SLOT_NAMES.includes(m.slot) && !used.has(m.slot)) {
+      used.add(m.slot);
+    } else {
+      waiting.push(m);
+    }
+  }
+  const free = SLOT_NAMES.filter((n) => !used.has(n));
+  waiting.forEach((m, i) => {
+    m.slot = free[i];
+  });
 }
 
 export type Preset = {
@@ -322,8 +374,9 @@ export function providerDisplayName(url: string, index: number): string {
 
 /** 链路板 / 编辑器共用的槽位展开（镜像后端 flatten_config 语义：跳过空名、封顶 MAX_MODELS）。 */
 export type FlatModel = {
+  /** 它在 Claude 里用的名字（存在配置里，见 normalizeSlots） */
   slot: string;
-  /** 该槽位在 Claude Desktop 里的推理强度档位（空 = 无选择器）。 */
+  /** 这个名字在 Claude Desktop 里的思考档位（空 = 无选择器）。 */
   efforts: string[];
   name: string;
   to1m: boolean;
@@ -332,14 +385,20 @@ export type FlatModel = {
 };
 
 export function flattenModels(config: Config): FlatModel[] {
+  // 草稿每次改动都规范过；没规范过的（刚读进来的老数据）现补一份，规则相同
+  if (needsSlots(config)) {
+    const normalized = structuredClone(config);
+    normalizeSlots(normalized);
+    config = normalized;
+  }
   const out: FlatModel[] = [];
   let count = 0;
   config.providers.forEach((p, pi) => {
     p.models.forEach((m, mi) => {
       if (count < MAX_MODELS && m.name) {
         out.push({
-          slot: slotId(count),
-          efforts: slotEfforts(count),
+          slot: m.slot!,
+          efforts: slotInfo(m.slot!).efforts,
           name: m.name,
           to1m: !!m.to_1m,
           providerIndex: pi,

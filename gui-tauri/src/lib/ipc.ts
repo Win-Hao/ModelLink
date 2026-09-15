@@ -22,6 +22,8 @@ export type ModelEntry = {
   pricing_synced?: ModelPricing;
   /** 上游该模型的最大上下文（token），由 models.dev 同步填，界面只读。 */
   context_limit?: number;
+  /** 它在 Claude 里用的名字（claude-opus-5 这类），决定有没有 Auto 模式、能调几档思考。没名字的行没有。 */
+  slot?: string;
 };
 
 export type Provider = {

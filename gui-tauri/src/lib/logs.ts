@@ -89,9 +89,14 @@ export function pricingComplete(config: Config | null): boolean {
   );
 }
 
-/** 这个槽位（可能带 [1m]）现在归哪个服务商；找不到为 undefined。 */
+/** Claude 请求的名字去掉 [1m] 和发布日期后缀（claude-haiku-4-5-20251001 → claude-haiku-4-5），和代理转发时同一口径。 */
+export function bareSlot(slot: string): string {
+  return slot.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+}
+
+/** 这个槽位（可能带 [1m] 或日期）现在归哪个服务商；找不到为 undefined。 */
 export function providerIndexForSlot(config: Config | null, slot: string): number | undefined {
   if (!config) return undefined;
-  const bare = slot.replace(/\[1m\]$/, "");
+  const bare = bareSlot(slot);
   return flattenModels(config).find((f) => f.slot === bare)?.providerIndex;
 }

@@ -38,7 +38,8 @@ import { availableModels, desktopInfo, type ModelEntry } from "@/lib/ipc";
 import {
   MAX_MODELS,
   ONE_M_CONTEXT,
-  SLOT_POOL,
+  AUTO_CHECK_SLOT,
+  SLOT_PREFERENCE,
   THINKING_LABELS,
   flattenModels,
   formatContext,
@@ -408,8 +409,8 @@ export function ProviderEditor({ index }: { index: number }) {
                       <Select value={slot.slot} onValueChange={(v) => chooseSlot(mi, v)}>
                         <SelectTrigger
                           size="sm"
-                          className="max-w-full min-w-0"
-                          title={`在 Claude 里：${slotAbility(slot.slot)}`}
+                          className="flex-none"
+                          title={`在 Claude 里：${slotAbility(slot.slot)}${slot.slot === AUTO_CHECK_SLOT ? "；Auto 模式的安全检查优先用它" : ""}`}
                           aria-label={`${m.name} 的映射模型`}
                         >
                           <SelectValue>
@@ -417,12 +418,19 @@ export function ProviderEditor({ index }: { index: number }) {
                           </SelectValue>
                         </SelectTrigger>
                         <SelectContent position="popper" align="start" className="w-[340px]">
-                          {SLOT_POOL.map(({ id: s }) => {
+                          {SLOT_PREFERENCE.map((s) => {
                             const holder = s !== slot.slot ? holders.get(s) : undefined;
                             return (
                               <SelectItem key={s} value={s} className="h-auto py-[5px]">
                                 <span className="flex min-w-0 flex-col items-start gap-px">
-                                  <span className="mono">{s}</span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="mono">{s}</span>
+                                    {s === AUTO_CHECK_SLOT && (
+                                      <span className="rounded-[5px] px-1.5 text-[11px] leading-[18px] text-fg2 inset-ring inset-ring-hair2">
+                                        优先做 Auto 安全检查
+                                      </span>
+                                    )}
+                                  </span>
                                   <span className="text-[11.5px] text-fg3">
                                     {slotAbility(s)}
                                     {holder && ` · 和「${holder}」互换`}
@@ -437,6 +445,9 @@ export function ProviderEditor({ index }: { index: number }) {
                           </p>
                         </SelectContent>
                       </Select>
+                      {slot.slot === AUTO_CHECK_SLOT && (
+                        <span className="truncate text-[12px] text-fg3">优先做 Auto 安全检查</span>
+                      )}
                       {/* 老版 Claude 不认 labelOverride：选择器里看到的就是这个代号，不是模型真名 */}
                       {slotShown && <span className="truncate text-[12px] text-fg3">Claude 里显示的是这个代号</span>}
                     </>

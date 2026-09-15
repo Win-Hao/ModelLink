@@ -140,6 +140,7 @@ const logs: LogEntry[] = [
   { time: "14:29:12", model: "claude-ml-4", slot: "claude-ml-4", status: 400, note: "未映射槽位", error: true, duration_ms: 3, usage: null, cost_usd: null },
   { time: "14:29:58", model: "kimi-k3", slot: "claude-opus-4-8", thinking: "max", duration_ms: 4800, cost_usd: 0.1312 },
   { time: "14:30:41", model: "deepseek-v4-flash", slot: "claude-sonnet-5", thinking: "off", note: "标题生成 · 已省思考", duration_ms: 1100, cost_usd: 0.0004 },
+  { time: "14:30:58", model: "deepseek-v4-flash", slot: "claude-sonnet-5", note: "Auto 模式安全检查", duration_ms: 950, cost_usd: 0.0021 },
   { time: "14:31:05", model: "kimi-k3", slot: "claude-opus-4-8", status: 401, duration_ms: 420, usage: null, cost_usd: null, detail: "Invalid Authentication" },
   { time: "14:31:20", model: "deepseek-v4-pro", slot: "claude-opus-5", thinking: "high", note: "已整流 · 思考预算过小", duration_ms: 2200 },
   { time: "14:31:52", model: "deepseek-v4-pro", slot: "claude-opus-5", thinking: "high", duration_ms: 1900 },

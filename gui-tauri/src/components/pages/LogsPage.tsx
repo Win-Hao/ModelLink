@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { appliedState, getLogStats, getLogs, type LogEntry, type TodayStats } from "@/lib/ipc";
 import {
+  bareSlot,
   formatDuration,
   formatTokens,
   formatUsd,
@@ -134,7 +135,7 @@ function FailureNote({ entry }: { entry: LogEntry }) {
     <code className="mono block text-[12px] break-all text-fg2">{entry.detail}</code>
   );
   const tags = noteTags(entry.note).map((t) => t.raw);
-  const bare = entry.slot.replace(/\[1m\]$/, "");
+  const bare = bareSlot(entry.slot);
 
   let title: string;
   let body: ReactNode;
@@ -147,15 +148,14 @@ function FailureNote({ entry }: { entry: LogEntry }) {
       body = "这个模型已经从 ModelLink 里删掉了，但 Claude Desktop 里还留着。应用一次，它就会从 Claude 里消失。";
       action = { label: "去概览页应用 →", run: () => setPage("overview") };
     } else {
-      // 槽位是按顺序自动分配的，没法「给这个槽位加模型」—— 能做的是在 Claude 里换一个模型
       body = (
         <>
-          多半是之前的对话还在用已经删掉的模型。在 Claude 里给这个对话重新选一个模型就行。ModelLink
+          多半是之前的对话还在用一个现在没有映射的代号。在 Claude 里给这个对话换一个模型，或者在「服务商」页把某个模型的映射模型改成它。ModelLink
           直接报错，不会悄悄换成别的模型回答。
-          <code className="mono block text-[12px] text-fg3">Claude 请求的名字：{bare}</code>
+          <code className="mono block text-[12px] text-fg3">Claude 请求的名字：{entry.slot.replace(/\[1m\]$/, "")}</code>
         </>
       );
-      action = { label: "看看现在接了哪些模型 →", run: () => setPage("overview") };
+      action = { label: "去「服务商」页改映射模型 →", run: () => setPage("providers") };
     }
   } else if (tags.some((t) => t.startsWith("连不上服务商"))) {
     title = "连不上服务商";

@@ -70,8 +70,26 @@ export const SLOT_POOL: Slot[] = [
   { id: "claude-haiku-4-5", efforts: [], auto: false },
 ];
 
-/** 能写进 Claude 的全部名字（镜像 config.rs::SLOT_POOL），顺序即新模型默认拿名字的先后。 */
+/** 能写进 Claude 的全部名字（镜像 config.rs::SLOT_POOL）。这个顺序是 2.2 之前按位置分配的顺序，不能改。 */
 export const SLOT_NAMES: readonly string[] = SLOT_POOL.map((s) => s.id);
+
+/**
+ * 新加的模型默认拿名字的先后（镜像 config.rs::SLOT_PREFERENCE），下拉里也按这个顺序列。
+ * claude-sonnet-5 排第一：Auto 模式的安全检查优先发给它，第一个模型放这里，检查就由主力模型来做。
+ */
+export const SLOT_PREFERENCE: readonly string[] = [
+  "claude-sonnet-5",
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+];
+
+/** Auto 模式安全检查优先用的名字。 */
+export const AUTO_CHECK_SLOT = "claude-sonnet-5";
 
 /** 这个名字在 Claude 里能用什么。 */
 export function slotInfo(slot: string): { efforts: string[]; auto: boolean } {
@@ -101,10 +119,16 @@ function needsSlots(config: Config): boolean {
 
 /**
  * 给会写进 Claude 的模型定下名字，就地改（镜像 config.rs::normalize_slots）。
- * 认得出、没重复的原样保留；其余有名字的按能力从高到低拿第一个空位；没名字的行、超出上限的不占名字。
+ * 认得出、没重复的原样保留；其余有名字的按 SLOT_PREFERENCE 拿第一个空位；没名字的行、超出上限的不占名字。
+ * 例外：应用过、一个名字都没存的老配置，按 2.2 之前的位置顺序补，和当时写进 Claude 的对得上。
  * 增删模型都不挪别人的 —— Claude 里选着某个名字的对话，不会悄悄换成别的模型。
  */
 export function normalizeSlots(config: Config): void {
+  const legacy = !!config.last_applied_at && namedModels(config).every((m) => !m.slot);
+  fillSlots(config, legacy ? SLOT_NAMES : SLOT_PREFERENCE);
+}
+
+function fillSlots(config: Config, order: readonly string[]): void {
   const named = new Set(namedModels(config));
   const used = new Set<string>();
   const waiting: ModelEntry[] = [];
@@ -117,7 +141,7 @@ export function normalizeSlots(config: Config): void {
       waiting.push(m);
     }
   }
-  const free = SLOT_NAMES.filter((n) => !used.has(n));
+  const free = order.filter((n) => !used.has(n));
   waiting.forEach((m, i) => {
     m.slot = free[i];
   });
@@ -381,10 +405,10 @@ export type FlatModel = {
 };
 
 export function flattenModels(config: Config): FlatModel[] {
-  // 草稿每次改动都规范过；没规范过的（刚读进来的老数据）现补一份，规则相同
+  // 草稿每次改动都规范过；没规范过的（刚读进来的老数据）按老的位置顺序现补一份，和后端一致
   if (needsSlots(config)) {
     const normalized = structuredClone(config);
-    normalizeSlots(normalized);
+    fillSlots(normalized, SLOT_NAMES);
     config = normalized;
   }
   const out: FlatModel[] = [];

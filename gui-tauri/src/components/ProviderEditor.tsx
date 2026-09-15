@@ -54,7 +54,7 @@ import { useAppStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { verificationText, type Verification } from "@/lib/verification";
 
-// 模型区列宽（design-2.2.md §6.2）：模型 262 · 上下文 96 · 1M 上下文 238 · 在 Claude 里 flex · 删除 32
+// 模型区列宽（design-2.2.md §6.2）：模型 262 · 上下文 96 · 1M 上下文 238 · 映射模型 flex · 删除 32
 const COL = {
   model: "w-[262px] flex-none",
   ctx: "w-[96px] flex-none",
@@ -350,7 +350,7 @@ export function ProviderEditor({ index }: { index: number }) {
           <span className={COL.model}>模型</span>
           <span className={COL.ctx}>上下文</span>
           <span className={COL.oneM}>1M 上下文</span>
-          <span className={COL.slot}>在 Claude 里</span>
+          <span className={COL.slot}>映射模型</span>
           <span className={COL.del} />
         </div>
 
@@ -404,29 +404,27 @@ export function ProviderEditor({ index }: { index: number }) {
                 <span className={cn(COL.slot, "text-[12.5px] text-fg2")}>
                   {slot ? (
                     <>
-                      {/* 能用什么由 Claude 按名字决定：Auto 模式、思考档位。下拉里直接写后果，名字放小字 */}
+                      {/* 映射到哪个 Claude 模型，决定它在 Claude 里有没有 Auto 模式、能调几档思考 —— 下拉每项都写着 */}
                       <Select value={slot.slot} onValueChange={(v) => chooseSlot(mi, v)}>
                         <SelectTrigger
                           size="sm"
                           className="max-w-full min-w-0"
-                          title={`Claude 内部用的名字：${slot.slot}`}
-                          aria-label={`${m.name} 在 Claude 里用的名字`}
+                          title={`在 Claude 里：${slotAbility(slot.slot)}`}
+                          aria-label={`${m.name} 的映射模型`}
                         >
                           <SelectValue>
-                            <span className={cn("truncate", slot.efforts.length === 0 && "text-fg3")}>
-                              {slotAbility(slot.slot)}
-                            </span>
+                            <span className="mono truncate">{slot.slot}</span>
                           </SelectValue>
                         </SelectTrigger>
-                        <SelectContent position="popper" align="start" className="w-[320px]">
+                        <SelectContent position="popper" align="start" className="w-[340px]">
                           {SLOT_POOL.map(({ id: s }) => {
                             const holder = s !== slot.slot ? holders.get(s) : undefined;
                             return (
                               <SelectItem key={s} value={s} className="h-auto py-[5px]">
                                 <span className="flex min-w-0 flex-col items-start gap-px">
-                                  <span>{slotAbility(s)}</span>
+                                  <span className="mono">{s}</span>
                                   <span className="text-[11.5px] text-fg3">
-                                    <span className="mono">{s}</span>
+                                    {slotAbility(s)}
                                     {holder && ` · 和「${holder}」互换`}
                                   </span>
                                 </span>
@@ -434,19 +432,16 @@ export function ProviderEditor({ index }: { index: number }) {
                             );
                           })}
                           <SelectSeparator />
-                          <p className="px-[9px] py-1.5 text-[11.5px] leading-[1.5] text-balance text-fg3">
-                            应用之后，Claude 里正选着这个名字的对话会换成新的模型。
+                          <p className="px-[9px] py-1.5 text-[11.5px] leading-[1.5] text-fg3">
+                            应用后，Claude 里选着这个代号的对话会换成新模型。
                           </p>
                         </SelectContent>
                       </Select>
-                      {slotShown && (
-                        <span className="truncate text-fg3">
-                          显示为 <span className="mono text-fg2">{slot.slot}</span>
-                        </span>
-                      )}
+                      {/* 老版 Claude 不认 labelOverride：选择器里看到的就是这个代号，不是模型真名 */}
+                      {slotShown && <span className="truncate text-[12px] text-fg3">Claude 里显示的是这个代号</span>}
                     </>
                   ) : m.name ? (
-                    // 超出 20 个的模型不会写进 Claude —— 说出来，别让它静默消失
+                    // 超出上限的模型不会写进 Claude —— 说出来，别让它静默消失
                     <span className="truncate text-[12px] text-danger">超出 {MAX_MODELS} 个上限，不会出现在 Claude 里</span>
                   ) : (
                     <span className="truncate text-[12px] text-fg3">选好模型后出现在 Claude 里</span>

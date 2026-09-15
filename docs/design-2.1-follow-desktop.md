@@ -800,6 +800,39 @@ effort 的投机分支排最后」，并单独钉了测试。
 | `egressProxyUrl` / `egressProxyPacUrl` | `Ho({allowHttp:!0}).optional()`，1.44121.1 | **PAC 设了就压过普通代理**，原文 "the PAC file wins and this key is ignored" |
 | `organizationInstructions` | `D().trim().min(1).max(3e3)`，1.37937.0 | |
 
+**Workspace 那一页的开关**（2026-09-15，1.49585.0 核实；「一键使用 Winhao 的配置」用）。
+全部是 `k().optional()` 布尔。**写进配置文件的是 flatKey，不一定等于界面上的字段名**：
+
+| 界面上 | flatKey | 默认 | 起始版本 |
+|---|---|---|---|
+| Cowork | `coworkTabEnabled` | 开 | 1.9659.0 |
+| Code | `isClaudeCodeForDesktopEnabled` | 开 | 1.2581.0 |
+| Chat | `chatTabEnabled` | 无（不写就是关） | 1.13576.0 |
+| Block reads outside working directories | `blockReadsOutsideWorkingDirectories` | 关 | 1.46388.1 |
+| Allow Auto mode | `autoModeEnabled` | 关 | 1.10628.0 |
+| Disable bypass permissions mode | `disableBypassPermissionsMode` | 关 | 1.46388.1 |
+| Disable bundled skills and workflows | `disableBundledSkills` | 关 | 1.15962.0 |
+| Allow user-created skills | `skillCreationEnabled` | 开 | 1.25927.0 |
+| Allow user-added plugin marketplaces | `userPluginMarketplacesEnabled` | 开 | 1.37937.0 |
+| Allow user-added plugins | `userPluginUploadsEnabled` | 开 | 1.37937.0 |
+| Disable Claude.ai sign-in | **`disableDeploymentModeChooser`** | 关 | 1.3834.0 |
+| Disable claude:// deep-link handling | **`disableDeepLinkRegistration`** | 关 | 1.6889.0 |
+| Skip WebFetch domain check | `skipWebFetchPreflight` | 关 | 1.37937.0 |
+| Enable tool search | `toolSearchEnabled` | 关 | 1.21459.0 |
+| Advanced file analysis | **`chatAdvancedFileAnalysisEnabled`** | 关 | 1.14271.0 |
+
+几条从 `description.long` 里读到的机制细节：
+
+- **Skip WebFetch domain check**：Code 里抓网页前先问 `api.anthropic.com` 这个域名在不在黑名单，
+  问不到就拒绝抓取（"Unable to verify if domain … is safe to fetch"）；连得上时每个抓取的域名都会发过去
+- **Enable tool search**：gateway 下会给请求加 `tool-search-tool-2025-10-19` beta、deferred tool loading、
+  `tool_reference` 内容块，原文 "If your endpoint does not accept the request shape it then receives, requests fail with HTTP 400"
+- **Allow Auto mode**：3p 下没开这个键时，桌面端给 Code 会话传 `disableAutoMode: "disable"`；
+  开了之后每个操作先过安全分类器，只对它判为有风险的弹确认
+- **Allowed egress hosts**（`coworkEgressAllowedHosts`）：不设时沙箱只能连推理地址，装包、抓网页 403；
+  `*` 关掉网络沙箱，但网页抓取仍挡内网地址
+- 遥测两项 `disableEssentialTelemetry` / `disableNonessentialTelemetry` 在 3p 下默认就是开（已屏蔽），不用写
+
 `claude-opus-5` 在本机 1.46388.3 的 `Vwt` 表里确认带
 `effortLevels:["low","medium","high","xhigh","max"], recommended:"high", modes:["auto"]`
 **外加一个 §1.1 没记的 `disallowThinkingDisabled:!0`** —— 意味着这些槽位上「关闭思考」

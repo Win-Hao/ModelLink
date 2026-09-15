@@ -2,16 +2,17 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/PageHeader";
+import { WinhaoPresetDialog } from "@/components/WinhaoPresetDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GITHUB_URL } from "@/lib/constants";
-import { desktopInfo, guiVersion, proxyStatus, revealClaudeConfig, syncPricing } from "@/lib/ipc";
+import { desktopInfo, guiVersion, proxyStatus, revealClaudeConfig, syncPricing, winhaoPresetState } from "@/lib/ipc";
 import { useHealth } from "@/lib/health";
 import { KEY_FEATURE_NAMES, formatSince } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
@@ -129,6 +130,49 @@ function Diagnostics() {
   );
 }
 
+/**
+ * 一键使用 Winhao 的配置（design-2.2.md §6.4）：把 Claude Desktop 工作区设置里的开关调成作者日常用的。
+ * 状态读的是 Claude 那边真正写着的值 —— 用户在 Claude 里自己改过，这里照实显示「有 N 项不同」。
+ */
+function WinhaoPresetRow() {
+  const { applyState } = useAppStore();
+  const [open, setOpen] = useState(false);
+  const presetQ = useQuery({ queryKey: ["winhao-preset"], queryFn: winhaoPresetState, refetchOnWindowFocus: true });
+  const st = presetQ.data;
+  const diff = st ? st.items.filter((i) => i.supported && i.current !== i.want).length : 0;
+
+  let sub: ReactNode;
+  if (!st) sub = "读取中…";
+  else if (!st.found) sub = "还没接入 Claude Desktop，先在概览页应用一次";
+  else if (diff === 0)
+    sub = (
+      <span className="flex items-center gap-1 text-ok">
+        <Check className="size-3" strokeWidth={2.6} />
+        Claude 里已经是 Winhao 的配置
+      </span>
+    );
+  else sub = `打开 Auto 模式和高级文件分析，跳过网页抓取的域名检查等 · 和现在有 ${diff} 项不同`;
+
+  return (
+    <>
+      <Row title="一键使用 Winhao 的配置" sub={sub}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!st?.found || applyState === "applying"}
+          onClick={() => {
+            void presetQ.refetch();
+            setOpen(true);
+          }}
+        >
+          {diff > 0 ? "查看并使用" : "查看"}
+        </Button>
+      </Row>
+      <WinhaoPresetDialog open={open} onOpenChange={setOpen} state={st} />
+    </>
+  );
+}
+
 /** 设置页（design-2.2.md §6.4）：常用 / 高级 / 出问题时。 */
 export function SettingsPage() {
   const { pref, setPref } = useTheme();
@@ -234,6 +278,7 @@ export function SettingsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-5">
         <Group title="常用">
+          <WinhaoPresetRow />
           <Row title="外观">
             <Tabs value={pref} onValueChange={(v) => setPref(v as ThemePref)}>
               <TabsList>

@@ -98,6 +98,23 @@ export type PendingApply = {
   pricing: boolean;
 };
 
+/** 一键配置里的一项（设置页「一键使用 Winhao 的配置」）。 */
+export type PresetItem = {
+  /** 写进 Claude 配置文件的键名 */
+  key: string;
+  want: boolean;
+  /** Claude 眼下实际生效的值（没写就是 Claude 的默认值） */
+  current: boolean;
+  /** 装的 Claude Desktop 版本认不认这个键；不认的应用时跳过 */
+  supported: boolean;
+};
+
+export type PresetState = {
+  /** 找到了 Claude 正在用的配置文件（没有就得先应用一次） */
+  found: boolean;
+  items: PresetItem[];
+};
+
 /** 上游 usage 里的 token 数。 */
 export type Usage = {
   input_tokens: number;
@@ -169,6 +186,9 @@ export const desktopInfo = () => invoke<DesktopInfo>("desktop_info");
 export const appliedState = () => invoke<AppliedState>("applied_state");
 /** 见 {@link PendingApply}。 */
 export const pendingApply = () => invoke<PendingApply>("pending_apply");
+export const winhaoPresetState = () => invoke<PresetState>("winhao_preset_state");
+/** 写入 Winhao 的配置并重启 Claude Desktop，返回写了几项。 */
+export const applyWinhaoPreset = () => invoke<number>("apply_winhao_preset");
 /** 在访达 / 资源管理器里选中 Claude Desktop 正在用的配置文件（出问题时让用户发过来）。 */
 export const revealClaudeConfig = () => invoke<void>("reveal_claude_config");
 /** 该服务商当前提供的模型（models.dev，按发布日期新→旧）；认不出或未同步时为空。 */

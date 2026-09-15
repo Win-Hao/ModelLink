@@ -151,6 +151,38 @@ function mockHash(c: Config): string {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 一键 Winhao 配置（与后端 gateway.rs WINHAO_PRESET 同表：键 · 推荐值 · Claude 默认值 · 起始版本）
+const PRESET: [string, boolean, boolean, string][] = [
+  ["coworkTabEnabled", true, true, "1.9659.0"],
+  ["isClaudeCodeForDesktopEnabled", true, true, "1.2581.0"],
+  ["chatTabEnabled", true, false, "1.13576.0"],
+  ["blockReadsOutsideWorkingDirectories", false, false, "1.46388.1"],
+  ["autoModeEnabled", true, false, "1.10628.0"],
+  ["disableBypassPermissionsMode", false, false, "1.46388.1"],
+  ["disableBundledSkills", false, false, "1.15962.0"],
+  ["skillCreationEnabled", true, true, "1.25927.0"],
+  ["userPluginMarketplacesEnabled", true, true, "1.37937.0"],
+  ["userPluginUploadsEnabled", true, true, "1.37937.0"],
+  ["disableDeploymentModeChooser", true, false, "1.3834.0"],
+  ["disableDeepLinkRegistration", false, false, "1.6889.0"],
+  ["skipWebFetchPreflight", true, false, "1.37937.0"],
+  ["toolSearchEnabled", false, false, "1.21459.0"],
+  ["chatAdvancedFileAnalysisEnabled", true, false, "1.14271.0"],
+];
+// Claude 配置文件里眼下写着的开关（ModelLink 应用时本来就写 chatTabEnabled / disableDeploymentModeChooser）
+// ?presetdone → 已经是 Winhao 的配置
+const presetFile: Record<string, boolean> = params.has("presetdone")
+  ? Object.fromEntries(PRESET.map(([k, v]) => [k, v]))
+  : { chatTabEnabled: true, disableDeploymentModeChooser: true, coworkTabEnabled: false };
+const desktopVersion = params.has("oldclaude") ? "1.30000.0" : "1.49585.0";
+const versionAtLeast = (have: string, want: string) => {
+  const a = have.split(".").map(Number), b = want.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return true;
+};
 let portDown = params.has("portdown");
 
 mockIPC(async (cmd, payload) => {
@@ -222,6 +254,27 @@ mockIPC(async (cmd, payload) => {
     }
     case "applied_state":
       return applied;
+    case "winhao_preset_state":
+      return {
+        found: applied.found,
+        items: PRESET.map(([key, want, def, since]) => ({
+          key,
+          want,
+          current: presetFile[key] ?? def,
+          supported: versionAtLeast(desktopVersion, since),
+        })),
+      };
+    case "apply_winhao_preset": {
+      await sleep(900);
+      let n = 0;
+      for (const [key, want, , since] of PRESET) {
+        if (versionAtLeast(desktopVersion, since)) {
+          presetFile[key] = want;
+          n++;
+        }
+      }
+      return n;
+    }
     case "pending_apply": {
       const port = store.port ?? 5678;
       return {

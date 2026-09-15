@@ -213,6 +213,8 @@ pub fn run() {
             commands::desktop_info,
             commands::applied_state,
             commands::pending_apply,
+            commands::winhao_preset_state,
+            commands::apply_winhao_preset,
             commands::reveal_claude_config,
             commands::force_quit_and_relaunch
         ])

@@ -691,6 +691,100 @@ fn pending_against(config: &Config, file: &serde_json::Value, gate: &VersionGate
     }
 }
 
+/// 「一键使用 Winhao 的配置」：Claude Desktop「Configure third-party inference → Workspace」那一页的开关，
+/// 作者日常用的取值。只拨开关，不碰列表类设置（允许的文件夹、工具策略、SSH 白名单）—— 那些是在替用户定范围。
+///
+/// 2026-09-15 对照 app.asar（1.49585.0）逐个核实：全部是 `k().optional()` 布尔。
+/// 列依次是：写进配置文件的键（flatKey，**不一定等于界面上的字段名**，如「Disable Claude.ai sign-in」
+/// 是 `disableDeploymentModeChooser`）· 推荐值 · 不写时 Claude 用的默认值 · 起始支持版本（availableInVersion）。
+/// 给低版本写它不认识的键可能让整份配置过不了校验，所以按版本跳过。
+pub const WINHAO_PRESET: &[(&str, bool, bool, &str)] = &[
+    ("coworkTabEnabled", true, true, "1.9659.0"),
+    ("isClaudeCodeForDesktopEnabled", true, true, "1.2581.0"),
+    // 没有 default，不写就是关的（见 write_gateway_keys）
+    ("chatTabEnabled", true, false, "1.13576.0"),
+    ("blockReadsOutsideWorkingDirectories", false, false, "1.46388.1"),
+    ("autoModeEnabled", true, false, "1.10628.0"),
+    ("disableBypassPermissionsMode", false, false, "1.46388.1"),
+    ("disableBundledSkills", false, false, "1.15962.0"),
+    ("skillCreationEnabled", true, true, "1.25927.0"),
+    ("userPluginMarketplacesEnabled", true, true, "1.37937.0"),
+    ("userPluginUploadsEnabled", true, true, "1.37937.0"),
+    ("disableDeploymentModeChooser", true, false, "1.3834.0"),
+    ("disableDeepLinkRegistration", false, false, "1.6889.0"),
+    // 抓网页前先问 api.anthropic.com 这个域名在不在黑名单，问不到就拒绝抓取 —— 连不上那个地址时 Code 里抓网页全失败
+    ("skipWebFetchPreflight", true, false, "1.37937.0"),
+    // 经过网关时会给请求加上 tool-search 的 beta 形状，端点不认就 HTTP 400
+    ("toolSearchEnabled", false, false, "1.21459.0"),
+    ("chatAdvancedFileAnalysisEnabled", true, false, "1.14271.0"),
+];
+
+/// 一键配置里的一项，和 Claude 那边眼下实际生效的值。
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct PresetItem {
+    pub key: String,
+    pub want: bool,
+    /// Claude 实际生效的值：配置文件里写了就是写的值，没写就是 Claude 的默认值
+    pub current: bool,
+    /// 装的 Claude Desktop 版本认不认这个键；不认的应用时跳过
+    pub supported: bool,
+}
+
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct PresetState {
+    /// 找到并读懂了 Claude 正在用的那份配置（没有就没法写，得先应用一次）
+    pub found: bool,
+    pub items: Vec<PresetItem>,
+}
+
+fn preset_state_of(file: Option<&serde_json::Value>, gate: &VersionGate) -> PresetState {
+    let items = WINHAO_PRESET
+        .iter()
+        .map(|(key, want, default, since)| PresetItem {
+            key: (*key).to_string(),
+            want: *want,
+            current: file.and_then(|f| f.get(*key)).and_then(|v| v.as_bool()).unwrap_or(*default),
+            supported: gate.allows_since(since),
+        })
+        .collect();
+    PresetState { found: file.is_some(), items }
+}
+
+/// 把一键配置写进已有的配置 JSON：只写这个版本认识的键，其余字段原样保留。返回写了几个键。
+fn write_winhao_preset_keys(existing: &mut serde_json::Value, gate: &VersionGate) -> usize {
+    let mut n = 0;
+    for (key, want, _, since) in WINHAO_PRESET {
+        if gate.allows_since(since) {
+            existing[*key] = serde_json::json!(want);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 见 [`PresetState`]。
+pub fn read_winhao_preset_state() -> PresetState {
+    preset_state_of(read_applied_json().as_ref(), &VersionGate::detect())
+}
+
+/// 把一键配置写进 Claude 正在用的那份配置文件。不负责重启 —— 调用方决定。
+///
+/// 文件不存在就报错、不新建：光有这几个开关、没有网关键的配置文件，Claude 读到的是一份残缺的配置。
+pub fn apply_winhao_preset() -> Result<usize, String> {
+    let path = applied_config_file().ok_or("Cannot find home directory")?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| "没找到 Claude Desktop 的配置 —— 先在概览页应用一次".to_string())?;
+    let mut existing: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Claude Desktop 的配置文件读不懂：{e}"))?;
+    if !existing.is_object() {
+        return Err("Claude Desktop 的配置文件格式不对".into());
+    }
+    let n = write_winhao_preset_keys(&mut existing, &VersionGate::detect());
+    let data = serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?;
+    write_with_retry(&path, &data)?;
+    Ok(n)
+}
+
 /// 见 [`PendingApply`]。没找到配置文件时 `found=false`，其余按「还没接上」处理。
 pub fn read_pending_apply(config: &Config) -> PendingApply {
     match read_applied_json() {
@@ -1324,6 +1418,77 @@ mod tests {
         let cfg = applied(cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]));
         let file = written_by_apply(&cfg, &old);
         assert!(!pending_against(&cfg, &file, &old).pricing);
+    }
+
+    /// 一键配置只拨布尔开关，键不重复 —— 写坏一个键的代价是整份配置失效。
+    #[test]
+    fn winhao_preset_is_boolean_switches_only() {
+        let mut seen = std::collections::HashSet::new();
+        for (key, _, _, since) in WINHAO_PRESET {
+            assert!(seen.insert(*key), "{key} 重复");
+            assert!(since.split('.').all(|p| p.parse::<u64>().is_ok()), "{key} 的版本号 {since} 解析不了");
+        }
+        let mut file = serde_json::json!({});
+        write_winhao_preset_keys(&mut file, &VersionGate::with_version(None));
+        for (key, v) in file.as_object().unwrap() {
+            assert!(v.is_boolean(), "{key} 必须是布尔");
+        }
+    }
+
+    /// 没写的键按 Claude 的默认值算；写了的按写的算。
+    #[test]
+    fn preset_state_reads_what_claude_actually_uses() {
+        let gate = VersionGate::with_version(None);
+        let file = serde_json::json!({
+            "autoModeEnabled": true,
+            "coworkTabEnabled": false,
+            "skipWebFetchPreflight": "yes", // 类型不对：Claude 不认，按默认值算
+        });
+        let st = preset_state_of(Some(&file), &gate);
+        assert!(st.found);
+        let get = |k: &str| st.items.iter().find(|i| i.key == k).unwrap();
+        assert!(get("autoModeEnabled").current);
+        assert!(!get("coworkTabEnabled").current);
+        assert!(get("isClaudeCodeForDesktopEnabled").current, "没写，默认开");
+        assert!(!get("chatTabEnabled").current, "没写，默认关");
+        assert!(!get("skipWebFetchPreflight").current);
+        assert!(!preset_state_of(None, &gate).found);
+    }
+
+    /// 写完之后，这个版本认识的每一项都和推荐值一致；用户其它字段不受影响。
+    #[test]
+    fn applying_the_preset_makes_every_supported_item_match() {
+        let gate = VersionGate::with_version(None);
+        let cfg = cfg_with(vec![priced("Kimi-k2.6", 4.0, 16.0)]);
+        let mut file = written_by_apply(&cfg, &gate);
+        file["coworkTabEnabled"] = serde_json::json!(false);
+        let before = file.clone();
+
+        assert_eq!(write_winhao_preset_keys(&mut file, &gate), WINHAO_PRESET.len());
+        let st = preset_state_of(Some(&file), &gate);
+        assert!(st.items.iter().all(|i| i.current == i.want), "{:?}", st.items);
+        // 网关键、模型列表、费率、用户自己的字段一个不动
+        for k in ["someUserSetting", "inferenceGatewayBaseUrl", "inferenceModels", "inferenceModelPricing"] {
+            assert_eq!(file[k], before[k], "{k}");
+        }
+        // ModelLink 自己要的「应用」状态不受影响
+        assert!(!pending_against(&applied(cfg.clone()), &file, &gate).gateway);
+    }
+
+    /// 老版 Claude 不认的键跳过，不写进去。
+    #[test]
+    fn old_desktop_only_gets_the_keys_it_knows() {
+        let old = VersionGate::with_version(Some("1.30000.0"));
+        let mut file = serde_json::json!({});
+        let n = write_winhao_preset_keys(&mut file, &old);
+        for k in ["blockReadsOutsideWorkingDirectories", "disableBypassPermissionsMode", "skipWebFetchPreflight",
+                  "userPluginMarketplacesEnabled", "userPluginUploadsEnabled"] {
+            assert!(file.get(k).is_none(), "{k} 不该写给 1.30000.0");
+        }
+        assert_eq!(file["autoModeEnabled"], true);
+        assert_eq!(n, file.as_object().unwrap().len());
+        let st = preset_state_of(Some(&file), &old);
+        assert!(!st.items.iter().find(|i| i.key == "skipWebFetchPreflight").unwrap().supported);
     }
 
     /// 老版本写的条目没有 labelOverride / supports1m；坏条目（没有 name）直接跳过，不连累整份。

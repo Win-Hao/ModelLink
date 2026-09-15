@@ -70,6 +70,12 @@ impl VersionGate {
         }
     }
 
+    /// 该版本起才认识的键能不能写（不在 [`KEY_MIN_VERSION`] 表里、自带版本号的键用，如一键配置）。
+    /// 探不到版本时同样全写，理由见 [`Self::allows`]。
+    pub fn allows_since(&self, min_version: &str) -> bool {
+        self.version.as_deref().is_none_or(|have| version_at_least(have, min_version))
+    }
+
     /// 因版本过低而不可用的键，给设置页展示。
     pub fn unavailable_keys(&self) -> Vec<&'static str> {
         KEY_MIN_VERSION

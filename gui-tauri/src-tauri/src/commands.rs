@@ -199,6 +199,22 @@ pub fn pending_apply(state: State<'_, Arc<ProxyState>>) -> gateway::PendingApply
     gateway::read_pending_apply(&config)
 }
 
+/// 设置页「一键使用 Winhao 的配置」：每一项推荐值和 Claude 眼下实际生效的值。
+#[tauri::command]
+pub fn winhao_preset_state() -> gateway::PresetState {
+    gateway::read_winhao_preset_state()
+}
+
+/// 把 Winhao 的配置写进 Claude Desktop 的配置并重启 Claude（它只在启动时读配置）。
+/// 返回写了几个键（装的 Claude 版本不认的键跳过）。
+#[tauri::command]
+pub async fn apply_winhao_preset() -> Result<usize, String> {
+    let n = gateway::apply_winhao_preset()?;
+    eprintln!("[preset] 已写入 Winhao 配置 {n} 项");
+    gateway::restart_claude_desktop();
+    Ok(n)
+}
+
 /// 设置页「打开配置目录」：在访达 / 资源管理器里选中 Claude Desktop 正在用的那份配置文件。
 /// 出问题时让用户把它发过来 —— 这个文件里没有 API 密钥（网关密钥固定写的是 "proxy"）。
 #[tauri::command]

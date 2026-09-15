@@ -1,6 +1,6 @@
 import { Fragment, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
+import { Activity, RefreshCw } from "lucide-react";
 
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,9 @@ const COL = {
 };
 
 type Filter = "all" | "failed" | "rectified" | `model:${string}`;
+
+/** 摘要里还没有数时的占位：细、浅，不抢眼。 */
+const EMPTY_STAT = <span className="font-normal text-fg3">—</span>;
 
 /** 摘要横带里的一格：数字与标签同基线，右边一句补充。 */
 function Stat({ value, unit, label, note, title, className }: {
@@ -77,21 +80,21 @@ function Summary({ stats, showCost }: { stats: TodayStats | undefined; showCost:
   return (
     <div className="panel mb-2.5 flex h-[62px] flex-none items-center">
       <Stat
-        value={has ? rateText : "—"}
+        value={has ? rateText : EMPTY_STAT}
         unit={has ? "%" : undefined}
         label="成功率"
         note={has ? (s.failures > 0 ? `${s.failures} 条失败` : `${s.requests} 条全部成功`) : `${day}还没有请求`}
         title={sinceTitle}
       />
       <Stat
-        value={has ? (s.duration_total_ms / s.requests / 1000).toFixed(1) : "—"}
+        value={has ? (s.duration_total_ms / s.requests / 1000).toFixed(1) : EMPTY_STAT}
         unit={has ? "s" : undefined}
         label="平均耗时"
         note={has ? `最慢 ${formatDuration(s.duration_max_ms)}` : undefined}
         title={sinceTitle}
       />
       <Stat
-        value={has ? formatTokens(s.input_tokens + s.output_tokens) : "—"}
+        value={has ? formatTokens(s.input_tokens + s.output_tokens) : EMPTY_STAT}
         label={`${day} token`}
         note={has ? `入 ${formatTokens(s.input_tokens)} · 出 ${formatTokens(s.output_tokens)}` : undefined}
         title={
@@ -108,9 +111,9 @@ function Summary({ stats, showCost }: { stats: TodayStats | undefined; showCost:
       />
       {costReady ? (
         <Stat
-          value={has ? formatUsd(s.cost_usd) : "—"}
+          value={has ? formatUsd(s.cost_usd) : EMPTY_STAT}
           label={`${day}花费`}
-          note="官方价"
+          note={has ? "官方价" : undefined}
           title={["按 models.dev 上各家服务商的官方价计算", sinceTitle].filter(Boolean).join("\n")}
         />
       ) : (
@@ -207,9 +210,29 @@ function FailureNote({ entry }: { entry: LogEntry }) {
   );
 }
 
+/** 一条记录都没有：不摆空表头和全是 0 的筛选条，说清楚这里会出现什么、没出现该去哪看。 */
+function EmptyLogs({ onOverview }: { onOverview: () => void }) {
+  return (
+    <div className="panel mb-5 flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-6 text-center">
+      <span className="mb-3.5 grid size-10 place-items-center rounded-full bg-sunken text-fg3 inset-ring inset-ring-hair">
+        <Activity size={18} />
+      </span>
+      <h2 className="text-heading">还没有请求</h2>
+      <p className="mt-1.5 text-[12.5px] leading-[1.7] text-fg3">Claude Desktop 发出的每个请求都会出现在这里。</p>
+      <p className="text-[12.5px] leading-[1.7] text-fg3">Claude 里一直连不上、这里却一条都没有？先去概览页看看哪一环没通。</p>
+      <button
+        onClick={onOverview}
+        className="mt-4 flex h-7 items-center rounded-[7px] bg-panel px-[11px] text-[12px] text-fg shadow-[inset_0_0_0_1px_var(--hair2)] transition-colors hover:bg-hair"
+      >
+        去概览页 →
+      </button>
+    </div>
+  );
+}
+
 /** 请求日志页（design-2.2.md §6.3）：今日摘要 + 筛选 + 数据行，失败行摊开原因。 */
 export function LogsPage() {
-  const { draft } = useAppStore();
+  const { draft, setPage } = useAppStore();
   const qc = useQueryClient();
   const logsQuery = useQuery({ queryKey: ["logs"], queryFn: getLogs, refetchInterval: 2000 });
   const statsQuery = useQuery({ queryKey: ["log-stats"], queryFn: getLogStats, refetchInterval: 2000 });
@@ -278,91 +301,87 @@ export function LogsPage() {
 
       <Summary stats={statsQuery.data} showCost={showCost} />
 
-      <div className="mb-3 flex flex-none items-center gap-1.5 overflow-hidden">
-        {chip("all", "全部", entries.length)}
-        {chip("failed", "仅失败", failedCount, true)}
-        {chip("rectified", "已自动修复", rectifiedCount)}
-        {topModels.map(([m, n]) => chip(`model:${m}`, m, n))}
-      </div>
+      {logsQuery.data && entries.length === 0 ? (
+        <EmptyLogs onOverview={() => setPage("overview")} />
+      ) : (
+        <>
+          <div className="mb-3 flex flex-none items-center gap-1.5 overflow-hidden">
+            {chip("all", "全部", entries.length)}
+            {chip("failed", "仅失败", failedCount, true)}
+            {chip("rectified", "已自动修复", rectifiedCount)}
+            {topModels.map(([m, n]) => chip(`model:${m}`, m, n))}
+          </div>
 
-      <div className="panel mb-5 flex min-h-0 flex-1 flex-col">
-        <div className="flex h-[34px] flex-none items-center gap-3 border-b border-hair px-[22px] text-label text-fg3">
-          <span className={COL.time}>时间</span>
-          <span className={COL.dot} />
-          <span className={COL.model}>模型</span>
-          <span className={COL.ms}>耗时</span>
-          <span className={COL.tokens}>TOKEN 入 → 出</span>
-          {showCost && <span className={COL.cost}>花费</span>}
-          <span className={COL.code}>状态</span>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {shown.length === 0 && (
-            <div className="px-[22px] py-10 text-center text-[12.5px] leading-[1.7] text-fg3">
-              {entries.length === 0 ? (
-                <>
-                  还没有请求记录。Claude Desktop 发出的每个请求都会出现在这里。
-                  <br />
-                  如果 Claude 里一直连不上、这里却一条都没有，先去概览页看看哪一环没通。
-                </>
-              ) : (
-                "这个筛选下没有记录"
-              )}
+          <div className="panel mb-5 flex min-h-0 flex-1 flex-col">
+            <div className="flex h-[34px] flex-none items-center gap-3 border-b border-hair px-[22px] text-label text-fg3">
+              <span className={COL.time}>时间</span>
+              <span className={COL.dot} />
+              <span className={COL.model}>模型</span>
+              <span className={COL.ms}>耗时</span>
+              <span className={COL.tokens}>TOKEN 入 → 出</span>
+              {showCost && <span className={COL.cost}>花费</span>}
+              <span className={COL.code}>状态</span>
             </div>
-          )}
 
-          {shown.map((e) => {
-            const failed = isFailure(e);
-            return (
-              <Fragment key={e.id}>
-                <div className="flex h-11 items-center gap-3 border-b border-hair px-[22px]">
-                  <span className={cn(COL.time, "mono text-[12px] text-fg3")}>{e.time}</span>
-                  <i className={cn(COL.dot, "h-1.5 rounded-full", failed ? "bg-danger" : "bg-ok")} />
-                  <span className={COL.model}>
-                    <span className="mono min-w-0 truncate text-[13px] font-medium tracking-[-0.01em]">
-                      {e.model}
-                    </span>
-                    <span className="flex-1" />
-                    {THINKING_TAGS[e.thinking] && e.thinking && (
-                      <span className="flex-none rounded-sm px-2 py-0.5 text-[11.5px] text-fg2 inset-ring inset-ring-hair2">
-                        {THINKING_TAGS[e.thinking]}
-                      </span>
-                    )}
-                    {noteTags(e.note).map((t) => (
-                      <span
-                        key={t.text}
-                        className={cn(
-                          "flex-none rounded-sm px-2 py-0.5 text-[11.5px] inset-ring",
-                          t.tone === "ok" && "text-ok inset-ring-ok/30",
-                          t.tone === "bad" && "text-danger inset-ring-danger/30",
-                          t.tone === "neutral" && "text-fg2 inset-ring-hair2",
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {shown.length === 0 && (
+                <div className="px-[22px] py-10 text-center text-[12.5px] leading-[1.7] text-fg3">这个筛选下没有记录</div>
+              )}
+
+              {shown.map((e) => {
+                const failed = isFailure(e);
+                return (
+                  <Fragment key={e.id}>
+                    <div className="flex h-11 items-center gap-3 border-b border-hair px-[22px]">
+                      <span className={cn(COL.time, "mono text-[12px] text-fg3")}>{e.time}</span>
+                      <i className={cn(COL.dot, "h-1.5 rounded-full", failed ? "bg-danger" : "bg-ok")} />
+                      <span className={COL.model}>
+                        <span className="mono min-w-0 truncate text-[13px] font-medium tracking-[-0.01em]">
+                          {e.model}
+                        </span>
+                        <span className="flex-1" />
+                        {THINKING_TAGS[e.thinking] && e.thinking && (
+                          <span className="flex-none rounded-sm px-2 py-0.5 text-[11.5px] text-fg2 inset-ring inset-ring-hair2">
+                            {THINKING_TAGS[e.thinking]}
+                          </span>
                         )}
-                      >
-                        {t.text}
+                        {noteTags(e.note).map((t) => (
+                          <span
+                            key={t.text}
+                            className={cn(
+                              "flex-none rounded-sm px-2 py-0.5 text-[11.5px] inset-ring",
+                              t.tone === "ok" && "text-ok inset-ring-ok/30",
+                              t.tone === "bad" && "text-danger inset-ring-danger/30",
+                              t.tone === "neutral" && "text-fg2 inset-ring-hair2",
+                            )}
+                          >
+                            {t.text}
+                          </span>
+                        ))}
                       </span>
-                    ))}
-                  </span>
-                  <span className={cn(COL.ms, "mono text-[12px] text-fg2")}>
-                    {e.duration_ms === null ? <span className="text-fg3">传输中</span> : formatDuration(e.duration_ms)}
-                  </span>
-                  <span className={cn(COL.tokens, "mono text-[12px] text-fg2")}>
-                    {e.usage ? `${formatTokens(promptTokens(e.usage))} → ${formatTokens(e.usage.output_tokens)}` : "—"}
-                  </span>
-                  {showCost && (
-                    <span className={cn(COL.cost, "mono text-[12px] text-fg2")}>
-                      {e.cost_usd === null ? "—" : formatUsd(e.cost_usd)}
-                    </span>
-                  )}
-                  <span className={cn(COL.code, "mono text-[12.5px] font-semibold", failed ? "text-danger" : "text-ok")}>
-                    {e.status}
-                  </span>
-                </div>
-                {failed && <FailureNote entry={e} />}
-              </Fragment>
-            );
-          })}
-        </div>
-      </div>
+                      <span className={cn(COL.ms, "mono text-[12px] text-fg2")}>
+                        {e.duration_ms === null ? <span className="text-fg3">传输中</span> : formatDuration(e.duration_ms)}
+                      </span>
+                      <span className={cn(COL.tokens, "mono text-[12px] text-fg2")}>
+                        {e.usage ? `${formatTokens(promptTokens(e.usage))} → ${formatTokens(e.usage.output_tokens)}` : "—"}
+                      </span>
+                      {showCost && (
+                        <span className={cn(COL.cost, "mono text-[12px] text-fg2")}>
+                          {e.cost_usd === null ? "—" : formatUsd(e.cost_usd)}
+                        </span>
+                      )}
+                      <span className={cn(COL.code, "mono text-[12.5px] font-semibold", failed ? "text-danger" : "text-ok")}>
+                        {e.status}
+                      </span>
+                    </div>
+                    {failed && <FailureNote entry={e} />}
+                  </Fragment>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

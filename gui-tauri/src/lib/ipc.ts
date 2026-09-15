@@ -96,6 +96,10 @@ export type PendingApply = {
   port_changed: boolean | null;
   /** 写进 Claude 的费率表过期了 */
   pricing: boolean;
+  /** Claude 里「允许联网的域名」不再放行全部：Cowork 和 Code 里抓网页、装包会失败 */
+  egress: boolean;
+  /** Claude 里的模型身份说明没了：模型可能自称 Claude */
+  identity: boolean;
 };
 
 /** 一键配置里的一项（设置页「一键使用 Winhao 的配置」）。 */

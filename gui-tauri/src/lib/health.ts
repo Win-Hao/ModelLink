@@ -106,8 +106,14 @@ export function useHealth() {
   });
   const gapText = (g: Gap) => `「${nameOf(g.index)}」${GAP_TEXT[g.what][0]}`;
 
-  // ---- 为什么要应用（同一个原因，链上短说、页头长说） ----
-  let applyWhy: { short: string; long: string } | null = null;
+  // Claude 的设置页里改得动、改掉就坏事的两项（后端 pending_apply 查的）。模型列表照样对得上，不说就没人知道
+  const drift = [
+    pa?.egress && { what: "允许联网的域名", effect: "Cowork 和 Code 里抓网页、装包会失败" },
+    pa?.identity && { what: "模型身份说明", effect: "模型可能会说自己是 Claude" },
+  ].filter((d): d is { what: string; effect: string } => !!d);
+
+  // ---- 为什么要应用（同一个原因，链上短说、页头长说，悬停看细节） ----
+  let applyWhy: { short: string; long: string; hint?: string } | null = null;
   if (applyState === "dirty") {
     if (neverApplied) {
       applyWhy = { short: "还没接入", long: "配好了，应用到 Claude Desktop 就能用" };
@@ -119,10 +125,22 @@ export function useHealth() {
       applyWhy = configChanged
         ? { short: `有 ${pendingCount} 处改动还没应用`, long: `有 ${pendingCount} 处改动还没应用到 Claude Desktop` }
         : { short: `有 ${pendingCount} 处和这里对不上`, long: `Claude Desktop 里有 ${pendingCount} 处和这里对不上` };
+    } else if (drift.length > 0) {
+      applyWhy = {
+        short: `有 ${drift.length} 处和这里对不上`,
+        long:
+          drift.length === 1
+            ? `Claude 里的${drift[0].what}被改了，${drift[0].effect}`
+            : `Claude Desktop 里有 ${drift.length} 处被改了，应用一次就能改回来`,
+      };
     } else if (pa?.pricing) {
       applyWhy = { short: "费率有更新，还没应用", long: "模型费率有更新，应用后 Claude 里的费用才按新价算" };
     } else {
       applyWhy = { short: "有改动还没应用", long: "配置改过，还没应用到 Claude Desktop" };
+    }
+    // 同时有别的原因要应用时，被改掉的那几项也写进悬停说明，不被盖住
+    if (drift.length > 0) {
+      applyWhy.hint = [...drift.map((d) => `${d.what}被改了：${d.effect}`), "应用一次就能改回来。"].join("\n");
     }
   }
 
@@ -156,7 +174,7 @@ export function useHealth() {
       hint: "Claude Desktop 的第三方推理配置被改过，现在没有指向 ModelLink。应用一次就能接回来。",
     };
   } else if (applyWhy) {
-    claude = { key: "claude", title: "Claude Desktop", tone: "attention", text: applyWhy.short };
+    claude = { key: "claude", title: "Claude Desktop", tone: "attention", text: applyWhy.short, hint: applyWhy.hint };
   } else {
     claude = { key: "claude", title: "Claude Desktop", tone: "ok", text: `已接入 · ${flat.length} 个模型` };
   }

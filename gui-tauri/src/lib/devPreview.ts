@@ -184,6 +184,8 @@ const versionAtLeast = (have: string, want: string) => {
   return true;
 };
 let portDown = params.has("portdown");
+// ?egressdrift / ?identitydrift → 用户在 Claude 的设置页里清空了联网域名 / 删了模型身份说明
+let claudeDrift = { egress: params.has("egressdrift"), identity: params.has("identitydrift") };
 
 mockIPC(async (cmd, payload) => {
   const args = payload as Record<string, unknown>;
@@ -227,6 +229,7 @@ mockIPC(async (cmd, payload) => {
       store.last_applied_port = store.port ?? 5678;
       applied = snapshot(store);
       appliedPricing = pricingSig(store);
+      claudeDrift = { egress: false, identity: false };
       return "Applied! Claude Desktop is restarting...";
     case "test_provider":
       await sleep(700);
@@ -282,6 +285,8 @@ mockIPC(async (cmd, payload) => {
         gateway: applied.provider !== "gateway" || applied.gateway_url !== `http://127.0.0.1:${port}`,
         port_changed: store.last_applied_port === undefined ? null : store.last_applied_port !== port,
         pricing: applied.found && appliedPricing !== pricingSig(store),
+        egress: applied.found && claudeDrift.egress,
+        identity: applied.found && claudeDrift.identity,
       };
     }
     case "reveal_claude_config":

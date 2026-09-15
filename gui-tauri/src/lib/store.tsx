@@ -421,7 +421,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   // 后端知道上次应用时的端口 = 2.2 之后应用过，可以完全按 Claude 实际写着的判断；
   // 否则（老版本应用的 / 从没应用过）哈希变了就算要应用，宁可多提示一次
   const byClaude = !!pa && pa.port_changed !== null;
-  const otherPending = !!pa && (pa.gateway || pa.pricing || pa.port_changed === true);
+  const otherPending = !!pa && (pa.gateway || pa.pricing || pa.port_changed === true || pa.egress || pa.identity);
   const needsApply = hasProviders && (pendingCount > 0 || otherPending || (!byClaude && dirty));
   const savedLive = hasProviders && dirty && byClaude && !needsApply;
 

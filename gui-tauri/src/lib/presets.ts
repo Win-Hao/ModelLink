@@ -5,8 +5,11 @@ import type { AppliedModel, AvailableModel, Config, ModelEntry } from "@/lib/ipc
 // 服务商预设与槽位常量 —— 数据自 v1 ui.html:272-360 平移，勿改。
 // ============================================================
 
-/** 镜像后端 config.rs::MAX_MODELS（2.1-B §3.6：8 → 20）。 */
-export const MAX_MODELS = 20;
+/**
+ * 镜像后端 config.rs::MAX_MODELS = SLOT_POOL 里的名字数。2.1 曾放到 20（第 9 个起用 claude-ml-N 占位名），
+ * 2.2 收回到 8：Claude 认得的真名只有 8 个，占位名不能调思考，实际也用不到这么多。
+ */
+export const MAX_MODELS = 8;
 
 /** 「1M 上下文」的判定门槛：各家数字不一（Kimi 1048576 / 智谱 1000000），取下限。 */
 export const ONE_M_CONTEXT = 1_000_000;
@@ -67,26 +70,19 @@ export const SLOT_POOL: Slot[] = [
   { id: "claude-haiku-4-5", efforts: [], auto: false },
 ];
 
-/** 能写进 Claude 的全部名字（镜像 config.rs::slot_names）：先是池子，再是 claude-ml-1 起的溢出层。 */
-export const SLOT_NAMES: readonly string[] = [
-  ...SLOT_POOL.map((s) => s.id),
-  ...Array.from({ length: MAX_MODELS - SLOT_POOL.length }, (_, i) => `claude-ml-${i + 1}`),
-];
+/** 能写进 Claude 的全部名字（镜像 config.rs::SLOT_POOL），顺序即新模型默认拿名字的先后。 */
+export const SLOT_NAMES: readonly string[] = SLOT_POOL.map((s) => s.id);
 
-/**
- * 这个名字在 Claude 里能用什么。溢出层的名字不在桌面端的表里，不能调思考；
- * 有没有 Auto 模式还没实测过（`null`），界面上不说。
- */
-export function slotInfo(slot: string): { efforts: string[]; auto: boolean | null } {
+/** 这个名字在 Claude 里能用什么。 */
+export function slotInfo(slot: string): { efforts: string[]; auto: boolean } {
   const s = SLOT_POOL.find((x) => x.id === slot);
-  return s ? { efforts: s.efforts, auto: s.auto } : { efforts: [], auto: null };
+  return { efforts: s?.efforts ?? [], auto: s?.auto ?? false };
 }
 
 /** 一句话说这个名字在 Claude 里能用什么（服务商页「在 Claude 里」那一列、换名字的下拉）。 */
 export function slotAbility(slot: string): string {
   const { efforts, auto } = slotInfo(slot);
-  const think = efforts.length > 0 ? `思考 ${efforts.length} 档` : "思考不能调";
-  return auto === true ? `Auto 模式 · ${think}` : auto === false ? `没有 Auto 模式 · ${think}` : think;
+  return `${auto ? "Auto 模式" : "没有 Auto 模式"} · ${efforts.length > 0 ? `思考 ${efforts.length} 档` : "思考不能调"}`;
 }
 
 /** 会写进 Claude 的模型：有名字的前 MAX_MODELS 个。 */
@@ -433,6 +429,11 @@ export function diffApplied(
   const current = new Set(flat.map((r) => r.slot));
   const removed = applied.filter((a) => !current.has(a.slot)).length;
   return { pending, removed };
+}
+
+/** 选好了模型的行数（不含没选模型的空行）。超过 MAX_MODELS 时，多出来的不会写进 Claude。 */
+export function namedModelCount(config: Config): number {
+  return config.providers.reduce((s, p) => s + p.models.filter((m) => m.name).length, 0);
 }
 
 /** 所有服务商模型总数（含未命名行，上限判定用，平移 v1 totalModels）。 */

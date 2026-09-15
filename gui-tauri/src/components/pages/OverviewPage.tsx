@@ -9,7 +9,7 @@ import { PresetGrid } from "@/components/PresetGrid";
 import { SetupSteps } from "@/components/SetupSteps";
 import { useHealth } from "@/lib/health";
 import { getLogs } from "@/lib/ipc";
-import { MAX_MODELS, flattenModels, formatSince } from "@/lib/presets";
+import { MAX_MODELS, flattenModels, formatSince, namedModelCount } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
 
 /** 概览页（design-2.2.md §6.1）；零服务商时变引导页（§6.5）。 */
@@ -43,6 +43,7 @@ export function OverviewPage() {
   }
 
   const used = draft ? flattenModels(draft).length : 0;
+  const named = draft ? namedModelCount(draft) : 0;
   const appliedSince = formatSince(draft?.last_applied_at);
   const logs = logsQuery.data ?? [];
   const latest = logs[logs.length - 1];
@@ -64,6 +65,12 @@ export function OverviewPage() {
             {used} / {MAX_MODELS}
           </b>{" "}
           个模型 · <b className="mono font-medium text-fg2">{draft?.providers.length ?? 0}</b> 个服务商
+          {named > MAX_MODELS && (
+            <span className="text-danger">
+              {" "}
+              · 超出的 <span className="mono">{named - MAX_MODELS}</span> 个不会出现在 Claude 里
+            </span>
+          )}
         </span>
         <span className="ml-auto">
           {appliedSince ? (

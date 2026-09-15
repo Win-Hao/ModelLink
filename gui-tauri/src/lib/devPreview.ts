@@ -41,7 +41,7 @@ let store: Config = {
   last_applied_port: new URLSearchParams(location.search).has("legacy") ? undefined : 5678,
 };
 
-// ?many=1 → 20 个模型 / 6 家服务商（看长表滚动）
+// ?many=1 → 20 个模型 / 6 家服务商（看长表滚动、超出 8 个上限的提示）
 const MANY: [string, string[]][] = [
   ["https://api.deepseek.com/anthropic", ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-r2"]],
   ["https://api.moonshot.cn/anthropic", ["kimi-k3", "kimi-k2.7-code", "kimi-latest"]],
@@ -147,7 +147,8 @@ const logs: LogEntry[] = [
 ].map(L);
 
 function mockHash(c: Config): string {
-  return JSON.stringify(c.providers);
+  // 与后端一致：Claude 里的名字（slot）不进哈希
+  return JSON.stringify(c.providers.map((p) => ({ ...p, models: p.models.map(({ slot: _slot, ...m }) => m) })));
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

@@ -9,7 +9,7 @@ import { ProviderEditor } from "@/components/ProviderEditor";
 import { SetupSteps, type SetupStep } from "@/components/SetupSteps";
 import { Button } from "@/components/ui/button";
 import type { Provider } from "@/lib/ipc";
-import { MAX_MODELS, flattenModels, providerDisplayName } from "@/lib/presets";
+import { MAX_MODELS, flattenModels, namedModelCount, providerDisplayName } from "@/lib/presets";
 import { useAppStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { verificationText, type Verification } from "@/lib/verification";
@@ -61,6 +61,8 @@ export function ProvidersPage() {
   }, [draft, selectedProvider, setSelectedProvider]);
 
   const used = draft ? flattenModels(draft).length : 0;
+  // 2.1 最多能配 20 个：升级后超出 8 个的那几行不会写进 Claude，页头照实说，别只写「8 / 8」
+  const named = draft ? namedModelCount(draft) : 0;
   const current = Math.min(selectedProvider, count - 1);
 
   return (
@@ -68,13 +70,20 @@ export function ProvidersPage() {
       <PageHeader
         title="服务商"
         sub={
-          <>
-            已添加{" "}
-            <span className="mono">
-              {used} / {MAX_MODELS}
-            </span>{" "}
-            个模型 · 编辑自动保存
-          </>
+          named > MAX_MODELS ? (
+            <span className="text-danger">
+              已添加 <span className="mono">{named}</span> 个模型，最多 <span className="mono">{MAX_MODELS}</span>{" "}
+              个，超出的 <span className="mono">{named - MAX_MODELS}</span> 个不会出现在 Claude 里
+            </span>
+          ) : (
+            <>
+              已添加{" "}
+              <span className="mono">
+                {used} / {MAX_MODELS}
+              </span>{" "}
+              个模型 · 编辑自动保存
+            </>
+          )
         }
         right={count > 0 ? <ApplyStatusArea /> : undefined}
       />

@@ -419,11 +419,7 @@ export function ProviderEditor({ index }: { index: number }) {
                           </SelectValue>
                         </SelectTrigger>
                         <SelectContent position="popper" align="start" className="w-[320px]">
-                          {[
-                            ...SLOT_POOL.map((s) => s.id),
-                            // 溢出层的名字彼此没区别，只列它自己正在用的那个
-                            ...(SLOT_POOL.some((s) => s.id === slot.slot) ? [] : [slot.slot]),
-                          ].map((s) => {
+                          {SLOT_POOL.map(({ id: s }) => {
                             const holder = s !== slot.slot ? holders.get(s) : undefined;
                             return (
                               <SelectItem key={s} value={s} className="h-auto py-[5px]">

@@ -139,6 +139,10 @@ NEW_BIN="$PWD/src-tauri/target/debug/modellink" bash regression/run.sh
   `models_dev_models` / `models_dev_context` / `last_applied_*`）。否则前端一份旧草稿保存下去就会抹掉后台同步的结果。
   这类字段进 `canonical_hash`，所以 dirty 判定必须用**后端返回的那份**配置算，用草稿算必然出错。
 - **`[1m]` 后缀永远不会到代理**：引擎会剥掉它、改发 `anthropic-beta: context-1m-2025-08-07` 头。
+- **模型在 Claude 里用的名字存在 `ModelEntry.slot`**（2.2），不再按位置现算 —— 按位置算时增删一个模型，
+  后面的全部挪位，Auto 模式和 Claude 里选着的对话都会悄悄变。规则前后端各一份
+  （`config.rs::normalize_slots` / `presets.ts::normalizeSlots`），改一处必须两边一起改。
+  名字决定 Auto 模式和思考档位，核实表在 design-2.1 §七⑧。
 - **本机挂着系统 HTTP 代理时，reqwest 连 127.0.0.1 也会走代理**（macOS 代理例外列表不生效）：
   连不上的端口会变成代理回的 502。起假上游的 Rust 测试一律 `Client::builder().no_proxy()`。
 - **Chat 模式的系统提示词里没有当前模型 ID**：只在 `organizationInstructions` 里列全部

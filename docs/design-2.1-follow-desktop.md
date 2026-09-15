@@ -833,6 +833,28 @@ effort 的投机分支排最后」，并单独钉了测试。
   `*` 关掉网络沙箱，但网页抓取仍挡内网地址
 - 遥测两项 `disableEssentialTelemetry` / `disableNonessentialTelemetry` 在 3p 下默认就是开（已屏蔽），不用写
 
+**哪些模型名有 Auto 模式**（2026-09-15，桌面端 1.49585.0 自带的 Claude Code 2.1.260 核实）。
+判断在引擎的 `Foe(model)`，桌面端的权限选项据此置灰（实测 claude-sonnet-4-6 上「Automatically approve」是灰的）：
+
+```js
+if (n.includes("claude-3-") || n in [opus-4-0, opus-4-1, opus-4-5, sonnet-4-0, sonnet-4-5, haiku-4-5]) return false
+if (provider !== "firstParty" && !bP(provider) && (n in [opus-4-6, sonnet-4-6] || n.includes("haiku"))) return false
+return true   // bP = anthropicAws || anthropicGoogleCloud；网关是 "gateway"，不算
+```
+
+| 名字 | Auto 模式（网关） | 思考档位（桌面端 `NEt` 表） | 思考模式 |
+|---|---|---|---|
+| claude-opus-5 / claude-sonnet-5 / claude-opus-4-8 / claude-opus-4-7 | 有 | 5 档 | auto |
+| claude-opus-4-6 | 没有 | 4 档 | extended |
+| claude-sonnet-4-6 | 没有 | 4 档 | auto |
+| claude-sonnet-4-5 / claude-haiku-4-5 | 没有 | 无 | extended |
+| claude-ml-N（溢出层） | 按代码是有（不在排除名单里），**没实测** | 无 | — |
+
+- 表里的「思考模式 auto / extended」是思考方式（adaptive / 固定预算），和 Auto 权限模式是两回事。
+- 名字里带 fable / mythos 的（正则 `^(?:claude-)?(?:fable|mythos)(?:-|$)`）桌面端一律给 5 档 + auto 思考，
+  引擎也不排除 Auto 模式，看起来能无限扩。**但不能拿来当映射名**：桌面端专门留了一份「暂不可用」名单
+  （`qTt`，这个版本是空的，配套链接 fable-mythos-access），引擎对 Fable 还有额度检查和拒答回退逻辑。
+
 `claude-opus-5` 在本机 1.46388.3 的 `Vwt` 表里确认带
 `effortLevels:["low","medium","high","xhigh","max"], recommended:"high", modes:["auto"]`
 **外加一个 §1.1 没记的 `disallowThinkingDisabled:!0`** —— 意味着这些槽位上「关闭思考」

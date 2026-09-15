@@ -47,7 +47,7 @@ function Connector({ tone }: { tone: Tone }) {
   );
 }
 
-function Node({ link, hideFix }: { link: HealthLink; hideFix: boolean }) {
+function Node({ link }: { link: HealthLink }) {
   return (
     <div className="flex min-w-0 flex-none items-center gap-3" title={link.hint}>
       <div className="min-w-0">
@@ -65,7 +65,7 @@ function Node({ link, hideFix }: { link: HealthLink; hideFix: boolean }) {
           )}
         </div>
       </div>
-      {link.fix && !hideFix && (
+      {link.fix && (
         <Button variant="ghost" size="sm" onClick={link.fix.run} className="flex-none">
           {link.fix.label}
         </Button>
@@ -77,10 +77,10 @@ function Node({ link, hideFix }: { link: HealthLink; hideFix: boolean }) {
 /**
  * 连通链（design-2.2.md §6.1）：Claude Desktop → ModelLink → 服务商。
  * 请求就是按这个方向走的；哪一环断了，那一环标出来，修的按钮就放在那一环上。
+ * 应用按钮不在这里：它固定在页头（§7）。
  */
-export function LinkChain({ links, primaryLabel }: { links: readonly HealthLink[]; primaryLabel?: string }) {
-  const { apply, applyState, draft, showHandoff } = useAppStore();
-  const busy = applyState === "applying";
+export function LinkChain({ links }: { links: readonly HealthLink[] }) {
+  const { showHandoff } = useAppStore();
 
   const reveal = async () => {
     try {
@@ -95,11 +95,10 @@ export function LinkChain({ links, primaryLabel }: { links: readonly HealthLink[
       {links.map((link, i) => (
         <Fragment key={link.key}>
           {i > 0 && <Connector tone={worse(links[i - 1].tone, link.tone)} />}
-          {/* 和页头主按钮是同一件事时不再放一遍，免得同一个「换一个端口」上下出现两次 */}
-          <Node link={link} hideFix={link.fix?.label === primaryLabel} />
+          <Node link={link} />
         </Fragment>
       ))}
-      {/* 平时用不到的操作收在这里：「重新应用」会重启 Claude，不该常驻在页头引人去点 */}
+      {/* 出问题时才用得上的操作 */}
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button variant="quiet" size="icon" className="ml-3 size-8 rounded-ctl" aria-label="更多操作">
@@ -107,10 +106,6 @@ export function LinkChain({ links, primaryLabel }: { links: readonly HealthLink[
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent className="min-w-[15rem]">
-          <DropdownMenuItem disabled={busy || !draft?.providers.length} onSelect={apply}>
-            重新应用到 Claude Desktop
-            <span className="ml-auto pl-3 text-[11.5px] text-fg3">会重启 Claude</span>
-          </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void reveal()}>打开 Claude 配置目录</DropdownMenuItem>
           {isWindows() && (
             <>

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { PrimaryActionButton } from "@/components/ApplyStatus";
+import { ApplyButton } from "@/components/ApplyStatus";
 import { HandoffCard } from "@/components/HandoffCard";
 import { LinkChain } from "@/components/LinkChain";
 import { ModelLinkTable } from "@/components/ModelLinkTable";
@@ -15,7 +15,7 @@ import { useAppStore } from "@/lib/store";
 /** 概览页（design-2.2.md §6.1）；零服务商时变引导页（§6.5）。 */
 export function OverviewPage() {
   const { draft, addProviderFromPreset, setPage } = useAppStore();
-  const { links, primary } = useHealth();
+  const { links, apply } = useHealth();
   const logsQuery = useQuery({ queryKey: ["logs"], queryFn: getLogs, refetchInterval: 2000 });
 
   // 空状态：概览页即引导
@@ -53,10 +53,10 @@ export function OverviewPage() {
       <PageHeader
         title="模型链路"
         sub="这些模型会出现在 Claude Desktop 的模型选择器里。"
-        right={<PrimaryActionButton primary={primary} />}
+        right={<ApplyButton action={apply} />}
       />
       <HandoffCard />
-      <LinkChain links={links} primaryLabel={primary && primary.kind !== "busy" ? primary.label : undefined} />
+      <LinkChain links={links} />
       <ModelLinkTable />
       <footer className="flex flex-none items-center gap-6 px-0.5 pt-3.5 text-[12.5px] text-fg3">
         <span>

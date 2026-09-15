@@ -7,7 +7,7 @@ import { verificationText } from "@/lib/verification";
 
 // ============================================================
 // 连通链（design-2.2.md §6.1）：Claude Desktop → ModelLink → 服务商，三环各自的状态，
-// 以及「现在最该做的一件事」。概览页的链、页头按钮、设置页的一键排查都读这一份，
+// 以及页头的应用按钮、修的按钮。概览页的链、页头按钮、设置页的一键排查都读这一份，
 // 免得一处说「已生效」、另一处说「连不上」。
 // ============================================================
 
@@ -28,9 +28,13 @@ export type HealthLink = {
   fix?: { label: string; run: () => void };
 };
 
-export type PrimaryAction =
+/** 页头的「应用」按钮（design-2.2.md §7）：一直在，轻重跟着状态走。 */
+export type ApplyAction =
   | { kind: "busy"; label: string }
-  | { kind: "fix" | "apply"; label: string; run: () => void };
+  /** 有服务商没填完：应用一定失败，按钮灰掉，旁边写缺什么 */
+  | { kind: "blocked"; label: string; reason: string }
+  /** note 是按钮旁边那句「会重启 Claude」 */
+  | { kind: "ready"; tone: "primary" | "quiet"; label: string; note: string; run: () => void };
 
 /** 页头那一行话 */
 export type StatusLine = { tone: Tone; text: string };
@@ -60,6 +64,15 @@ const GAP_TEXT: Record<Gap["what"], [string, string]> = {
   key: ["还没填 API 密钥", "去填 API 密钥"],
   models: ["还没有模型", "去加模型"],
   modelName: ["有一行模型没选", "去选模型"],
+};
+
+/** 应用按钮灰掉时旁边那句：先做什么才能应用 */
+const GAP_REASON: Record<Gap["what"], (name: string) => string> = {
+  url: (n) => `先填好「${n}」的 API 地址`,
+  urlScheme: (n) => `先把「${n}」的 API 地址改成 https:// 开头`,
+  key: (n) => `先填好「${n}」的 API 密钥`,
+  models: (n) => `先给「${n}」加一个模型`,
+  modelName: (n) => `先选好「${n}」没选的那行模型`,
 };
 
 export function useHealth() {
@@ -234,23 +247,34 @@ export function useHealth() {
     };
   }
 
-  // ---- 现在最该做的一件事（页头按钮） ----
-  let primary: PrimaryAction | null = null;
-  if (applyState === "applying") primary = { kind: "busy", label: "正在重启 Claude…" };
-  else if (proxyDown) primary = { kind: "fix", ...proxy.fix! };
-  else if (gap) primary = { kind: "fix", ...gapFix(gap) };
-  else if (applyState === "error") primary = { kind: "apply", label: "重试", run: apply };
-  else if (applyState === "dirty") primary = { kind: "apply", label: "应用到 Claude Desktop", run: apply };
+  // ---- 页头的「应用」按钮：一直在 ----
+  // 原先只在要应用时出现，平时收在 ⋯ 菜单里；有服务商没填完时页头换成「去填 API 密钥」，
+  // 看着「有 N 处改动还没应用」却找不到应用按钮（2026-09-15 作者实测）
+  let applyButton: ApplyAction | null = null;
+  if (providers.length > 0) {
+    if (applyState === "applying") applyButton = { kind: "busy", label: "正在重启 Claude…" };
+    // 没填完时应用一定失败 —— 按钮亮着的话，点了报错，配的按钮却是「重试」
+    else if (gap) applyButton = { kind: "blocked", label: "应用到 Claude Desktop", reason: GAP_REASON[gap.what](nameOf(gap.index)) };
+    else if (applyState === "error") applyButton = { kind: "ready", tone: "primary", label: "重试", note: "会重启 Claude Desktop", run: apply };
+    // 代理没在跑时要先换端口（顶栏和链上都在说），应用不抢这个位置
+    else if (applyState === "dirty")
+      applyButton = { kind: "ready", tone: proxyDown ? "quiet" : "primary", label: "应用到 Claude Desktop", note: "会重启 Claude Desktop", run: apply };
+    else applyButton = { kind: "ready", tone: "quiet", label: "重新应用", note: "会重启 Claude", run: apply };
+  }
+
+  // ---- 修的按钮：概览页放在出问题的那一环上；服务商页没有链，放在应用按钮旁边 ----
+  const fix = proxyDown ? proxy.fix! : gap ? gapFix(gap) : null;
 
   // ---- 页头那一行话（服务商页；概览页由链来说） ----
   let line: StatusLine;
   if (applyState === "applying") line = { tone: "idle", text: "Claude Desktop 会自动重启" };
   else if (proxyDown) line = { tone: "bad", text: "ModelLink 没在运行，Claude 现在连不上" };
-  else if (gap && (applyState === "dirty" || applyState === "error")) line = { tone: neverApplied ? "attention" : "bad", text: gapText(gap) };
+  // 和链上服务商那一环同一句：没填完就说，不管要不要应用 —— 应用过之后把密钥删了，请求照样会失败
+  else if (gap) line = { tone: neverApplied ? "attention" : "bad", text: gapText(gap) };
   else if (applyState === "error") line = { tone: "bad", text: `应用失败：${applyError}` };
   else if (applyWhy) line = { tone: "attention", text: applyWhy.long };
   else if (savedLive) line = { tone: "ok", text: "已保存，立即生效" };
   else line = { tone: "ok", text: "配置已生效" };
 
-  return { links: [claude, proxy, provider] as const, primary, line, proxyDown, gap };
+  return { links: [claude, proxy, provider] as const, apply: applyButton, fix, line, proxyDown, gap };
 }

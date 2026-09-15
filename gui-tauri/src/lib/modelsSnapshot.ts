@@ -1,18 +1,18 @@
 // 由 scripts/sync-models-snapshot.mjs 生成，请勿手改。
-// 数据源：https://models.dev/api.json　抓取日期：2026-09-14
+// 数据源：https://models.dev/api.json　抓取日期：2026-09-15
 //
 // 这是**兜底**清单：模型名输入框优先用运行时同步来的数据，拉不到时才用这份。
 // 发版前跑 `npm run sync-models` 刷新，把改动一起提交。
 
 /** 抓取日期，界面上标注「截至 X」用。 */
-export const MODELS_SNAPSHOT_DATE = "2026-09-14";
+export const MODELS_SNAPSHOT_DATE = "2026-09-15";
 
 /** models.dev 服务商 ID → 模型 ID（发布日期新→旧）。 */
 export const MODELS_SNAPSHOT: Record<string, string[]> = {
   "kimi-for-coding": [
+    "kimi-for-coding",
     "k3",
     "k3-256k",
-    "kimi-for-coding",
     "kimi-for-coding-highspeed"
   ],
   "moonshotai-cn": [
@@ -60,6 +60,7 @@ export const MODELS_SNAPSHOT: Record<string, string[]> = {
     "qwen3-coder-plus"
   ],
   "alibaba-token-plan-cn": [
+    "deepseek-v4.1-flash",
     "qwen3.8-flash",
     "deepseek-v4-pro-0813",
     "qwen3.8-max",

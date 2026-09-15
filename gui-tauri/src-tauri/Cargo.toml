@@ -1,6 +1,6 @@
 [package]
 name = "modellink"
-version = "2.2.0"
+version = "2.2.1"
 description = "ModelLink — 把国产大模型接入 Claude Desktop"
 authors = ["Winhao学AI"]
 edition = "2021"

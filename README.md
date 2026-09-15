@@ -12,7 +12,10 @@ Kimi · MiniMax · 百炼 · 智谱 GLM · DeepSeek · mimo — 一键切换，�
 
 <br/>
 
-<img src="docs/images/overview.png" alt="ModelLink 概览页 — 模型链路板" width="700"/>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-dark.png">
+  <img src="docs/images/overview.png" alt="ModelLink 概览页 — 模型链路" width="720"/>
+</picture>
 
 <br/>
 
@@ -24,16 +27,17 @@ Kimi · MiniMax · 百炼 · 智谱 GLM · DeepSeek · mimo — 一键切换，�
 >
 > 如果你是花钱买到的这个软件，你被骗了，请举报卖家。
 
-## 2.1 有什么新东西
+## 2.2 有什么新东西
 
-- **Claude 里能逐次调推理强度了**：模型选择器直接出现 5 档（low / medium / high / Extra / max）+ auto 思考模式。以前只能在 ModelLink 里按服务商设一次，在 Claude 里选了不生效
-- **费用不再是假账单**：新增真实费率表，Usage 页按你实际用的服务商计价，不再按 Anthropic 官方价估算。费率从 [models.dev](https://models.dev) 自动同步；订阅制方案正确显示为 0
-- **不再有「悄悄换了个模型」**：请求了没配置的槽位直接报错，不再静默改用第一个模型
-- **1M 上下文按真实能力判定**：模型其实装不下 1M 时界面直接标出真实上限，不再默认开
-- **长生成不断流**：上游思考期间由 ModelLink 往 Claude 发保活心跳
-- **上游报错自动修复**：不认推理强度、thinking 预算过小、验不了历史思考块签名时自动改写重试，你完全无感
-- **模型清单跟随 models.dev**：各家新出的模型自动出现在补全列表里，不用等 ModelLink 发版
-- Chat 标签页默认开启；模型数上限 8 → 20
+- **界面重做**：顶部导航、更大的窗口、新的深色模式。概览页一眼看清 Claude → ModelLink → 服务商这一路通不通，每个模型是「已生效」还是「未应用」
+- **Claude 里直接调思考深度**：模型选择器里出现思考深度（最多 5 档），选哪档就按哪档发给服务商
+- **模型在 Claude 里用哪个代号，自己选**：代号决定能不能调思考深度、有没有 Auto 模式；增删模型不会打乱别的模型
+- **Auto 模式看得见**：安全检查优先交给 claude-sonnet-5 上的模型，新加的模型默认先放这里；日志里标出每一次安全检查
+- **请求日志更有用**：耗时、token、花费一目了然；出错的请求用大白话说原因，并带你去改
+- **一键使用 Winhao 的配置 / 一键排查**：Auto 模式、高级文件分析这些 Claude 工作区开关一次调好；Claude 里连不上、模型不见了，先点排查
+- **费用不再是假账单**：按各家服务商官方价计算（从 [models.dev](https://models.dev) 自动同步），有模型查不到价格就不显示，不再按 Anthropic 官方价估算
+- **不再悄悄换模型**：Claude 请求了没配置的模型时直接报错；开着 1M 上下文但模型装不下时，界面标出真实上限
+- **更稳**：服务商不认思考参数、思考预算太小等报错自动修复重试；长回答期间自动保活，减少断流
 
 <details>
 <summary>2.0 的改动</summary>
@@ -51,24 +55,33 @@ Kimi · MiniMax · 百炼 · 智谱 GLM · DeepSeek · mimo — 一键切换，�
 </details>
 
 <div align="center">
-<img src="docs/images/guide.png" alt="首次启动 - 预设网格引导" width="380"/>
-&nbsp;&nbsp;&nbsp;&nbsp;
-<img src="docs/images/providers.png" alt="服务商页 - 双栏编辑器" width="380"/>
+<img src="docs/images/guide.png" alt="首次启动 — 三步接入" width="400"/>
+&nbsp;&nbsp;
+<img src="docs/images/providers.png" alt="服务商页 — 模型与映射代号" width="400"/>
 
-<sub>左：首启引导（内置 8 家服务商预设） &nbsp;|&nbsp; 右：服务商双栏编辑器</sub>
+<sub>左：首次启动三步引导（内置 8 家服务商预设） &nbsp;|&nbsp; 右：服务商页，每个模型可选在 Claude 里用的代号</sub>
+
+<br/><br/>
+
+<img src="docs/images/logs.png" alt="请求日志 — 耗时、token 与花费" width="400"/>
+&nbsp;&nbsp;
+<img src="docs/images/settings.png" alt="设置页 — 一键使用 Winhao 的配置、一键排查" width="400"/>
+
+<sub>左：请求日志（耗时 / token / 花费） &nbsp;|&nbsp; 右：设置页（一键使用 Winhao 的配置、一键排查）</sub>
 </div>
 
 ## 功能
 
 - 将第三方模型（DeepSeek、Kimi、智谱 GLM、MiniMax、百炼、mimo 等）接入 Claude Desktop
-- 支持同时配置多个 API 服务商（模型总数最多 20 个），内置主流服务商预设（带品牌图标），也可自定义
-- Claude 原生推理强度选择器；真实费率表；1M 上下文变体（按模型真实能力判定）
-- 上游报错自动修复重试；长生成保活心跳；连接测试
-- 请求日志、开机自启、深色/亮色/跟随系统主题、代理端口可配置
+- 支持同时配置多个 API 服务商（所有服务商的模型加起来最多 8 个），内置 8 家服务商预设（带品牌图标），也可自定义
+- Claude 原生思考深度选择器与 Auto 模式；每个模型在 Claude 里用的代号可选
+- 真实费率表（models.dev 自动同步）；1M 上下文按模型真实能力判定
+- 上游报错自动修复重试；长回答保活心跳；连接测试；一键排查
+- 请求日志（耗时 / token / 花费）、开机自启、深色/亮色/跟随系统主题、代理端口可配置
 - 菜单栏/系统托盘常驻，关闭窗口后代理继续运行
 
 > **联网说明**：为了让费用估算保持准确，ModelLink 启动时会向 [models.dev](https://models.dev)
-> （社区维护的开源模型数据库）请求一次费率数据，最多 6 小时一次。可在设置页关闭。
+> （社区维护的开源模型数据库）请求一次费率和模型清单，最多 6 小时一次。可在设置页关闭。
 > 除此之外和检查软件更新，ModelLink 不会主动联网。
 
 ## 下载
@@ -112,12 +125,19 @@ ModelLink 会自动写入大部分配置，但首次使用需在 Claude Desktop 
 
 > 之后所有模型/服务商的增删改都只在 ModelLink 里完成。
 
+## 用 Auto 模式
+
+- 只有在 Claude 里用 `claude-opus-5`、`claude-sonnet-5`、`claude-opus-4-8`、`claude-opus-4-7` 这几个代号的模型能选 Auto 模式，和背后是哪家的模型无关。代号在「服务商」页的「映射模型」一列换
+- Auto 模式默认是关的：在设置页点「**一键使用 Winhao 的配置**」会顺手打开，也可以在 Claude Desktop 的第三方推理设置里自己开
+- 跑命令这类操作之前，Claude 会先做一次安全检查。检查优先交给 `claude-sonnet-5` 上的模型；它没映射或出错，就改用你正在对话的模型。**建议把主力模型放在 `claude-sonnet-5`**
+- 安全检查同样消耗 token，在请求日志里标为「Auto 模式安全检查」，花了多少一眼能看到
+
 ## 从 2.0 升级
 
-直接覆盖安装或用应用内自动更新。2.1 换了 Claude 侧的模型槽位，所以：
+直接覆盖安装或用应用内自动更新（macOS）。2.2 换了模型在 Claude 里用的代号，所以：
 
-- 升级后首次打开会提示「新版为你的模型启用了 Claude Desktop 原生推理强度选择器」
-- 点一次「**应用到 Claude Desktop**」即可生效，配置文件无需迁移
+- 升级后概览页会提示「新版要重新应用一次」，点一次「**应用到 Claude Desktop**」即可，配置文件无需迁移
+- 升级前开着的对话如果提示「模型槽位 … 未映射到任何服务商」，在 Claude 的模型选择器里给它重新选一个模型
 
 ## 从 1.x 升级
 
@@ -125,6 +145,7 @@ ModelLink 会自动写入大部分配置，但首次使用需在 Claude Desktop 
 
 - 配置文件（`~/.claude-model-proxy/config.json`）原样沿用，服务商列表无损保留
 - 代理端口（5678）与 Claude 接入方式不变，Claude Desktop 无需重新配置
+- 打开 ModelLink 后点一次「**应用到 Claude Desktop**」，换上新的模型代号
 - 老版本的「开机自启」会自动迁移到新机制
 - 从 2.0 起支持应用内自动更新，以后不用再手动下载
 

@@ -92,8 +92,8 @@ cd src-tauri && cargo clippy --all-targets   # 必须零告警
 
 ## 还没做的
 
-- 深色模式只画了概览页。其余六页按 `design-2.2.md` §2 的变量表推。
-- 没画：更新弹窗、删除服务商的确认框、端口被占的原生提示、空日志状态。
-  这些沿用现有逻辑，套新 token 即可。
-- `docs/images/*.png`（README 里的截图）实现完要重拍。
-- DMG 背景（`src-tauri/dmg/background.src.html`）还是 Outfit，字体文件已挪到它旁边；要换字得重新出图。
+- 端口被占的提示是系统原生对话框，样式改不了，只能改文案。
+
+已收尾（2026-09-16）：深色模式其余几页和弹窗逐个核对过；更新弹窗、删除确认本来就套了新 token，用真实鼠标点开看过没问题
+（脚本合成的点击会让默认焦点按钮亮出焦点环，那是假象）；空日志页做了正式的空状态；README 截图随 2.2.0 重拍；
+DMG 背景换成 Archivo + 2.2 深色 token，出 1x/2x 合成 `background.tiff`（出图步骤写在 `background.src.html` 头部注释里）。
